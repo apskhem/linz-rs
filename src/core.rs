@@ -11,8 +11,11 @@ use serde::Serialize;
 
 use crate::err::*;
 
-type Handler<Q, H, P, C, B, R> =
-    Arc<dyn Fn(Request<Q, H, P, C, B>) -> Pin<Box<dyn Future<Output = HTTPResponse<R>> + Send>> + Send + Sync>;
+type Handler<Q, H, P, C, B, R> = Arc<
+    dyn Fn(Request<Q, H, P, C, B>) -> Pin<Box<dyn Future<Output = HTTPResponse<R>> + Send>>
+        + Send
+        + Sync,
+>;
 
 pub trait Payload: JsonSchema + DeserializeOwned + Serialize {
     fn jsonschema_validator() -> &'static jsonschema::Validator {
@@ -24,16 +27,18 @@ pub trait Payload: JsonSchema + DeserializeOwned + Serialize {
             let schema = Self::json_schema(&mut generator);
             let json = serde_json::to_value(&schema).unwrap();
             let validator = jsonschema::validator_for(&json).unwrap();
-    
+
             validator
         })
     }
 
-    fn validate_and_transform(payload: &[u8]) -> Result<Self, ValidationError> {
-        let payload = serde_json::from_slice(payload).map_err(ValidationError::InvalidJSON)?;
+    fn decode_payload_to_validate(payload: &[u8]) -> Result<serde_json::Value, ValidationError> {
+        serde_json::from_slice(payload).map_err(ValidationError::InvalidJSON)
+    }
 
+    fn validate_json_payload(payload: &serde_json::Value) -> Result<(), ValidationError> {
         let err_results: Vec<_> = Self::jsonschema_validator()
-            .iter_errors(&payload)
+            .iter_errors(payload)
             .map(ValidationFieldError::from)
             .collect();
 
@@ -41,11 +46,39 @@ pub trait Payload: JsonSchema + DeserializeOwned + Serialize {
             return Err(ValidationError::FailedValidating(err_results));
         }
 
+        return Ok(());
+    }
+
+    fn validate_and_transform(payload: &[u8]) -> Result<Self, ValidationError> {
+        let payload = Self::decode_payload_to_validate(payload)?;
+
+        Self::validate_json_payload(&payload)?;
+
         Self::deserialize(payload).map_err(ValidationError::FailedDeserializing)
     }
 }
 
-pub struct Endpoint<Q, H, P, C, B, R: Payload> {
+pub trait QueryPayload: Payload {
+    fn decode_payload_to_validate(payload: &[u8]) -> Result<serde_json::Value, ValidationError> {
+        Ok(serde_qs::from_bytes(payload).unwrap())
+    }
+}
+
+pub trait HeaderPayload: Payload {}
+
+pub trait PathPayload: Payload {}
+
+pub trait CookiePayload: Payload {}
+
+pub struct Endpoint<Q, H, P, C, B, R>
+where
+    Q: QueryPayload,
+    H: HeaderPayload,
+    P: PathPayload,
+    C: CookiePayload,
+    B: Payload,
+    R: Payload,
+{
     pub tags: Vec<oas3::spec::Tag>,
     pub summary: Option<String>,
     pub description: Option<String>,
@@ -58,19 +91,14 @@ pub struct Endpoint<Q, H, P, C, B, R: Payload> {
     pub handler: Handler<Q, H, P, C, B, R>,
 }
 
-/* impl<Q, H, P, C, B> Default for Endpoint<Q, H, P, C, B> {
+impl Default for Endpoint<(), (), (), (), (), ()> {
     fn default() -> Self {
         Self {
             tags: Default::default(),
             summary: Default::default(),
             description: Default::default(),
             operation_id: Default::default(),
-            parameters: Parameters {
-                query: (),
-                header: (),
-                path: (),
-                cookie: ()
-            },
+            parameters: Parameters::default(),
             request_body: Default::default(),
             responses: Default::default(),
             deprecated: Default::default(),
@@ -78,15 +106,28 @@ pub struct Endpoint<Q, H, P, C, B, R: Payload> {
             handler: noop_handler(),
         }
     }
-} */
-
-fn noop_handler<Q, H, P, C, B, R: Payload>() -> Handler<Q, H, P, C, B, ()> {
-    Arc::new(|_| Box::pin(async {
-        HTTPResponse::<()>::default()
-    }))
 }
 
-pub struct Request<Q, H, P, C, B> {
+fn noop_handler<Q, H, P, C, B>() -> Handler<Q, H, P, C, B, ()>
+where
+    Q: QueryPayload,
+    H: HeaderPayload,
+    P: PathPayload,
+    C: CookiePayload,
+    B: Payload,
+{
+    Arc::new(|_| Box::pin(async { HTTPResponse::<()>::default() }))
+}
+
+#[derive(Debug)]
+pub struct Request<Q, H, P, C, B>
+where
+    Q: QueryPayload,
+    H: HeaderPayload,
+    P: PathPayload,
+    C: CookiePayload,
+    B: Payload,
+{
     pub queries: Q,
     pub headers: H,
     pub params: P,
@@ -94,19 +135,54 @@ pub struct Request<Q, H, P, C, B> {
     pub body: B,
 }
 
-#[derive(Default)]
-pub struct Parameters<Q, H, P, C> {
+#[derive(Debug)]
+pub struct Parameters<Q, H, P, C>
+where
+    Q: QueryPayload,
+    H: HeaderPayload,
+    P: PathPayload,
+    C: CookiePayload,
+{
     pub query: Q,
     pub header: H,
     pub path: P,
     pub cookie: C,
 }
 
+impl Default for Parameters<(), (), (), ()> {
+    fn default() -> Self {
+        Self {
+            query: (),
+            header: (),
+            path: (),
+            cookie: (),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct HTTPResponse<B: Payload> {
     pub headers: HeaderMap,
     pub status: StatusCode,
-    pub body: Option<B>
+    pub body: Option<B>,
+}
+
+impl<B: Payload> HTTPResponse<B> {
+    fn send_status(status: StatusCode) -> Self {
+        Self {
+            status,
+            headers: Default::default(),
+            body: None,
+        }
+    }
+
+    fn without_body(status: StatusCode, headers: Option<HeaderMap>) -> Self {
+        Self {
+            status,
+            headers: headers.unwrap_or_default(),
+            body: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -115,7 +191,7 @@ pub struct SenderBody<B: Payload> {
     pub headers: HashMap<HeaderName, String>,
     pub examples: HashMap<String, oas3::spec::Example>,
     pub mime_type: Mime,
-    pub body: Option<B>
+    pub body: Option<B>,
 }
 
 impl<B: Payload> Default for SenderBody<B> {
@@ -125,7 +201,7 @@ impl<B: Payload> Default for SenderBody<B> {
             headers: Default::default(),
             examples: Default::default(),
             mime_type: mime::APPLICATION_JSON,
-            body: None
+            body: None,
         }
     }
 }
@@ -134,10 +210,15 @@ impl<B: Payload> Default for SenderBody<B> {
 pub struct Responses<B: Payload> {
     pub ok_response: (StatusCode, SenderBody<B>),
     pub other_responses: (StatusCode, SenderBody<()>),
-    pub default_response: Option<SenderBody<()>>
+    pub default_response: Option<SenderBody<()>>,
 }
 
 #[derive(Debug, Default)]
 pub struct Security {}
 
-impl Payload for () { }
+// blank type
+impl Payload for () {}
+impl QueryPayload for () {}
+impl PathPayload for () {}
+impl HeaderPayload for () {}
+impl CookiePayload for () {}

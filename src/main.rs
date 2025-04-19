@@ -5,8 +5,10 @@ use http::StatusCode;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
 
+pub mod adapter;
 pub mod core;
 pub mod err;
+pub mod json_builder;
 
 const EMAIL_REGEX: &str = r"^[\w\.-]+@[\w\.-]+\.\w+$";
 
@@ -31,12 +33,7 @@ fn main() {
         summary: Option::None,
         description: Option::None,
         operation_id: String::new(),
-        parameters: core::Parameters {
-            query: (),
-            header: (),
-            path: (),
-            cookie: (),
-        },
+        parameters: core::Parameters::default(),
         request_body: Some(()),
         responses: core::Responses {
             ok_response: (StatusCode::OK, core::SenderBody {
