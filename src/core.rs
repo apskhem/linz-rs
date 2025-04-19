@@ -17,7 +17,7 @@ type Handler<Q, H, P, C, B, R> = Arc<
         + Sync,
 >;
 
-pub trait Payload: JsonSchema + DeserializeOwned + Serialize {
+pub trait Payload: JsonSchema + DeserializeOwned + Serialize + Clone + Send + Sync {
     fn jsonschema_validator() -> &'static jsonschema::Validator {
         static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 
@@ -32,34 +32,52 @@ pub trait Payload: JsonSchema + DeserializeOwned + Serialize {
         })
     }
 
-    fn decode_payload_to_validate(payload: &[u8]) -> Result<serde_json::Value, ValidationError> {
-        serde_json::from_slice(payload).map_err(ValidationError::InvalidJSON)
+    fn decoding_content_type() -> Mime {
+        mime::APPLICATION_JSON
     }
 
-    fn validate_json_payload(payload: &serde_json::Value) -> Result<(), ValidationError> {
+    fn content_type_decoder(payload: &[u8]) -> Result<serde_json::Value, PayloadError> {
+        serde_json::from_slice(payload).map_err(PayloadError::InvalidJSON)
+    }
+
+    fn validate_json_payload(payload: &serde_json::Value) -> Result<(), PayloadError> {
         let err_results: Vec<_> = Self::jsonschema_validator()
             .iter_errors(payload)
             .map(ValidationFieldError::from)
             .collect();
 
         if !err_results.is_empty() {
-            return Err(ValidationError::FailedValidating(err_results));
+            return Err(PayloadError::FailedValidating(err_results));
         }
 
         return Ok(());
     }
 
-    fn validate_and_transform(payload: &[u8]) -> Result<Self, ValidationError> {
-        let payload = Self::decode_payload_to_validate(payload)?;
+    fn validate_and_transform(payload: &[u8]) -> Result<Self, PayloadError> {
+        let payload = Self::content_type_decoder(payload)?;
 
         Self::validate_json_payload(&payload)?;
 
-        Self::deserialize(payload).map_err(ValidationError::FailedDeserializing)
+        Self::deserialize(payload).map_err(PayloadError::FailedDeserializing)
+    }
+
+    fn encoding_content_type() -> Mime {
+        mime::APPLICATION_JSON
+    }
+
+    fn content_type_encoder(self) -> Result<serde_json::Value, PayloadError> {
+        serde_json::to_value(self).map_err(PayloadError::FailedSerializing)
+    }
+
+    fn into_bytes(self) -> Result<Vec<u8>, PayloadError> {
+        let payload = self.content_type_encoder()?;
+
+        Ok(payload.to_string().as_bytes().to_vec())
     }
 }
 
 pub trait QueryPayload: Payload {
-    fn decode_payload_to_validate(payload: &[u8]) -> Result<serde_json::Value, ValidationError> {
+    fn content_type_decoder(payload: &[u8]) -> Result<serde_json::Value, PayloadError> {
         Ok(serde_qs::from_bytes(payload).unwrap())
     }
 }
@@ -70,6 +88,7 @@ pub trait PathPayload: Payload {}
 
 pub trait CookiePayload: Payload {}
 
+#[derive(Clone)]
 pub struct Endpoint<Q, H, P, C, B, R>
 where
     Q: QueryPayload,
@@ -108,6 +127,18 @@ impl Default for Endpoint<(), (), (), (), (), ()> {
     }
 }
 
+pub trait IntoEndpoint<Q, H, P, C, B, R>
+where
+    Q: QueryPayload,
+    H: HeaderPayload,
+    P: PathPayload,
+    C: CookiePayload,
+    B: Payload,
+    R: Payload,
+{
+    fn get_endpoint() -> Endpoint<Q, H, P, C, B, R>;
+}
+
 fn noop_handler<Q, H, P, C, B>() -> Handler<Q, H, P, C, B, ()>
 where
     Q: QueryPayload,
@@ -119,7 +150,7 @@ where
     Arc::new(|_| Box::pin(async { HTTPResponse::<()>::default() }))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Request<Q, H, P, C, B>
 where
     Q: QueryPayload,
@@ -128,14 +159,14 @@ where
     C: CookiePayload,
     B: Payload,
 {
-    pub queries: Q,
-    pub headers: H,
-    pub params: P,
-    pub cookies: C,
-    pub body: B,
+    pub queries: Option<Q>,
+    pub headers: Option<H>,
+    pub params: Option<P>,
+    pub cookies: Option<C>,
+    pub body: Option<B>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Parameters<Q, H, P, C>
 where
     Q: QueryPayload,
@@ -143,24 +174,24 @@ where
     P: PathPayload,
     C: CookiePayload,
 {
-    pub query: Q,
-    pub header: H,
-    pub path: P,
-    pub cookie: C,
+    pub query: Option<Q>,
+    pub header: Option<H>,
+    pub path: Option<P>,
+    pub cookie: Option<C>,
 }
 
 impl Default for Parameters<(), (), (), ()> {
     fn default() -> Self {
         Self {
-            query: (),
-            header: (),
-            path: (),
-            cookie: (),
+            query: None,
+            header: None,
+            path: None,
+            cookie: None,
         }
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct HTTPResponse<B: Payload> {
     pub headers: HeaderMap,
     pub status: StatusCode,
@@ -185,7 +216,7 @@ impl<B: Payload> HTTPResponse<B> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SenderBody<B: Payload> {
     pub description: Option<String>,
     pub headers: HashMap<HeaderName, String>,
@@ -206,14 +237,14 @@ impl<B: Payload> Default for SenderBody<B> {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Responses<B: Payload> {
     pub ok_response: (StatusCode, SenderBody<B>),
     pub other_responses: (StatusCode, SenderBody<()>),
     pub default_response: Option<SenderBody<()>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Security {}
 
 // blank type

@@ -11,8 +11,9 @@ impl From<jsonschema::ValidationError<'_>> for ValidationFieldError {
 }
 
 #[derive(Debug)]
-pub enum ValidationError {
+pub enum PayloadError {
     InvalidJSON(serde_json::Error),
     FailedValidating(Vec<ValidationFieldError>),
     FailedDeserializing(serde_json::Error),
+    FailedSerializing(serde_json::Error),
 }

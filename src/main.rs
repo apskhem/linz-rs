@@ -1,6 +1,7 @@
 use core::Payload;
 use std::{collections::HashMap, sync::Arc};
 
+use axum::Router;
 use http::StatusCode;
 use schemars::{schema_for, JsonSchema};
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,7 @@ pub mod json_builder;
 
 const EMAIL_REGEX: &str = r"^[\w\.-]+@[\w\.-]+\.\w+$";
 
-#[derive(Serialize, Deserialize, JsonSchema)]
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
 #[schemars(rename_all = "camelCase")]
 struct User {
     #[schemars(length(min = 3, max = 20))]
@@ -28,7 +29,9 @@ struct User {
 impl core::Payload for User {}
 
 fn main() {
-    let a = core::Endpoint {
+    let mut app = Router::<()>::new();
+
+    let tmp_endpoint = core::Endpoint {
         tags: Vec::new(),
         summary: Option::None,
         description: Option::None,
@@ -48,6 +51,8 @@ fn main() {
             core::HTTPResponse::<()>::default()
         })),
     };
+
+    let app = adapter::add_route(app, "get:/", tmp_endpoint);
 
     println!("Hello, world!");
 }
