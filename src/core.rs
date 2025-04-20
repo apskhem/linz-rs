@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
-use http::{HeaderMap, HeaderName, StatusCode};
+use http::{Extensions, HeaderMap, HeaderName, StatusCode};
 use mime::Mime;
 use schemars::{gen::*, JsonSchema};
 use serde::de::DeserializeOwned;
@@ -12,12 +13,21 @@ use serde::Serialize;
 use crate::err::*;
 
 type Handler<Q, H, P, C, B, R> = Arc<
-    dyn Fn(Request<Q, H, P, C, B>) -> Pin<Box<dyn Future<Output = HTTPResponse<R>> + Send>>
+    dyn Fn(
+            Request<Q, H, P, C, B>,
+            Extensions,
+        ) -> Pin<Box<dyn Future<Output = HTTPResponse<R>> + Send>>
         + Send
         + Sync,
 >;
 
-pub trait Payload: JsonSchema + DeserializeOwned + Serialize + Clone + Send + Sync {
+pub trait DataTransferObject:
+    JsonSchema + DeserializeOwned + Serialize + Clone + Send + Sync
+{
+    fn bind() -> PhantomData<Self> {
+        PhantomData::<Self>::default()
+    }
+
     fn jsonschema_validator() -> &'static jsonschema::Validator {
         static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 
@@ -37,7 +47,7 @@ pub trait Payload: JsonSchema + DeserializeOwned + Serialize + Clone + Send + Sy
     }
 
     fn content_type_decoder(payload: &[u8]) -> Result<serde_json::Value, PayloadError> {
-        serde_json::from_slice(payload).map_err(PayloadError::InvalidJSON)
+        serde_json::from_slice(payload).map_err(PayloadError::InvalidData)
     }
 
     fn validate_json_payload(payload: &serde_json::Value) -> Result<(), PayloadError> {
@@ -76,34 +86,22 @@ pub trait Payload: JsonSchema + DeserializeOwned + Serialize + Clone + Send + Sy
     }
 }
 
-pub trait QueryPayload: Payload {
-    fn content_type_decoder(payload: &[u8]) -> Result<serde_json::Value, PayloadError> {
-        Ok(serde_qs::from_bytes(payload).unwrap())
-    }
-}
-
-pub trait HeaderPayload: Payload {}
-
-pub trait PathPayload: Payload {}
-
-pub trait CookiePayload: Payload {}
-
 #[derive(Clone)]
 pub struct Endpoint<Q, H, P, C, B, R>
 where
-    Q: QueryPayload,
-    H: HeaderPayload,
-    P: PathPayload,
-    C: CookiePayload,
-    B: Payload,
-    R: Payload,
+    Q: DataTransferObject,
+    H: DataTransferObject,
+    P: DataTransferObject,
+    C: DataTransferObject,
+    B: DataTransferObject,
+    R: DataTransferObject,
 {
     pub tags: Vec<oas3::spec::Tag>,
     pub summary: Option<String>,
     pub description: Option<String>,
     pub operation_id: String,
     pub parameters: Parameters<Q, H, P, C>,
-    pub request_body: Option<B>,
+    pub request_body: PhantomData<B>,
     pub responses: Responses<R>,
     pub deprecated: Option<bool>,
     pub security: Vec<Security>,
@@ -127,37 +125,25 @@ impl Default for Endpoint<(), (), (), (), (), ()> {
     }
 }
 
-pub trait IntoEndpoint<Q, H, P, C, B, R>
-where
-    Q: QueryPayload,
-    H: HeaderPayload,
-    P: PathPayload,
-    C: CookiePayload,
-    B: Payload,
-    R: Payload,
-{
-    fn get_endpoint() -> Endpoint<Q, H, P, C, B, R>;
-}
-
 fn noop_handler<Q, H, P, C, B>() -> Handler<Q, H, P, C, B, ()>
 where
-    Q: QueryPayload,
-    H: HeaderPayload,
-    P: PathPayload,
-    C: CookiePayload,
-    B: Payload,
+    Q: DataTransferObject,
+    H: DataTransferObject,
+    P: DataTransferObject,
+    C: DataTransferObject,
+    B: DataTransferObject,
 {
-    Arc::new(|_| Box::pin(async { HTTPResponse::<()>::default() }))
+    Arc::new(|_, _| Box::pin(async { HTTPResponse::<()>::default() }))
 }
 
 #[derive(Debug, Clone)]
 pub struct Request<Q, H, P, C, B>
 where
-    Q: QueryPayload,
-    H: HeaderPayload,
-    P: PathPayload,
-    C: CookiePayload,
-    B: Payload,
+    Q: DataTransferObject,
+    H: DataTransferObject,
+    P: DataTransferObject,
+    C: DataTransferObject,
+    B: DataTransferObject,
 {
     pub queries: Option<Q>,
     pub headers: Option<H>,
@@ -169,36 +155,36 @@ where
 #[derive(Debug, Clone)]
 pub struct Parameters<Q, H, P, C>
 where
-    Q: QueryPayload,
-    H: HeaderPayload,
-    P: PathPayload,
-    C: CookiePayload,
+    Q: DataTransferObject,
+    H: DataTransferObject,
+    P: DataTransferObject,
+    C: DataTransferObject,
 {
-    pub query: Option<Q>,
-    pub header: Option<H>,
-    pub path: Option<P>,
-    pub cookie: Option<C>,
+    pub query: Q,
+    pub header: H,
+    pub path: P,
+    pub cookie: C,
 }
 
 impl Default for Parameters<(), (), (), ()> {
     fn default() -> Self {
         Self {
-            query: None,
-            header: None,
-            path: None,
-            cookie: None,
+            query: Default::default(),
+            header: Default::default(),
+            path: Default::default(),
+            cookie: Default::default(),
         }
     }
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct HTTPResponse<B: Payload> {
+pub struct HTTPResponse<B: DataTransferObject> {
     pub headers: HeaderMap,
     pub status: StatusCode,
     pub body: Option<B>,
 }
 
-impl<B: Payload> HTTPResponse<B> {
+impl<B: DataTransferObject> HTTPResponse<B> {
     fn send_status(status: StatusCode) -> Self {
         Self {
             status,
@@ -217,7 +203,7 @@ impl<B: Payload> HTTPResponse<B> {
 }
 
 #[derive(Debug, Clone)]
-pub struct SenderBody<B: Payload> {
+pub struct SenderBody<B: DataTransferObject> {
     pub description: Option<String>,
     pub headers: HashMap<HeaderName, String>,
     pub examples: HashMap<String, oas3::spec::Example>,
@@ -225,7 +211,7 @@ pub struct SenderBody<B: Payload> {
     pub body: Option<B>,
 }
 
-impl<B: Payload> Default for SenderBody<B> {
+impl<B: DataTransferObject> Default for SenderBody<B> {
     fn default() -> Self {
         Self {
             description: Default::default(),
@@ -238,7 +224,7 @@ impl<B: Payload> Default for SenderBody<B> {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct Responses<B: Payload> {
+pub struct Responses<B: DataTransferObject> {
     pub ok_response: (StatusCode, SenderBody<B>),
     pub other_responses: (StatusCode, SenderBody<()>),
     pub default_response: Option<SenderBody<()>>,
@@ -248,8 +234,4 @@ pub struct Responses<B: Payload> {
 pub struct Security {}
 
 // blank type
-impl Payload for () {}
-impl QueryPayload for () {}
-impl PathPayload for () {}
-impl HeaderPayload for () {}
-impl CookiePayload for () {}
+impl DataTransferObject for () {}

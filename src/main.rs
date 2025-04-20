@@ -1,14 +1,15 @@
-use core::Payload;
-use std::{collections::HashMap, sync::Arc};
+use core::DataTransferObject;
+use std::{any::Any, marker::PhantomData, sync::Arc};
 
 use axum::Router;
 use http::StatusCode;
-use schemars::{schema_for, JsonSchema};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub mod adapter;
 pub mod core;
 pub mod err;
+pub mod internal;
 pub mod json_builder;
 
 const EMAIL_REGEX: &str = r"^[\w\.-]+@[\w\.-]+\.\w+$";
@@ -26,10 +27,23 @@ struct User {
     email: String,
 }
 
-impl core::Payload for User {}
+impl core::DataTransferObject for User {
+    fn decoding_content_type() -> mime::Mime {
+        mime::APPLICATION_PDF
+    }
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+#[schemars(rename_all = "camelCase")]
+struct UserQuery {
+    #[schemars(length(min = 3, max = 20))]
+    email: String,
+}
+
+impl core::DataTransferObject for UserQuery {}
 
 fn main() {
-    let mut app = Router::<()>::new();
+    let app = Router::<()>::new();
 
     let tmp_endpoint = core::Endpoint {
         tags: Vec::new(),
@@ -37,22 +51,27 @@ fn main() {
         description: Option::None,
         operation_id: String::new(),
         parameters: core::Parameters::default(),
-        request_body: Some(()),
+        request_body: User::bind(),
         responses: core::Responses {
-            ok_response: (StatusCode::OK, core::SenderBody {
-                body: Some(()),
-                ..Default::default()
-            }),
+            ok_response: (
+                StatusCode::OK,
+                core::SenderBody {
+                    body: Some(()),
+                    ..Default::default()
+                },
+            ),
             ..Default::default()
         },
         deprecated: Option::None,
         security: Vec::new(),
-        handler: Arc::new(|req| Box::pin(async {
-            core::HTTPResponse::<()>::default()
-        })),
+        handler: Arc::new(|req, ext| Box::pin(async { core::HTTPResponse::<()>::default() })),
     };
 
-    let app = adapter::add_route(app, "get:/", tmp_endpoint);
+    // let app = adapter::add_route(app, "get:/", tmp_endpoint);
 
     println!("Hello, world!");
+    println!(
+        "{}",
+        tmp_endpoint.request_body.type_id() == PhantomData::<()>::default().type_id()
+    );
 }
