@@ -1,48 +1,34 @@
-// use bytes::Bytes;
-// use http_body_util::{BodyExt, Empty, Full};
-// use hyper::body::Incoming;
-// use hyper::{Method, Request, Response, StatusCode};
+use std::any::Any;
+use std::convert::identity;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::pin::Pin;
 
-// type GenericError = Box<dyn std::error::Error + Send + Sync>;
-// type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
-
-// async fn handle(req: Request<Incoming>) -> Result<Response<BoxBody>, GenericError> {
-//     let (perts, body) = req.into_parts();
-//     let method = perts.method;
-//     let uri = perts.uri;
-//     let headers = perts.headers;
-
-//     let payload = body.collect().await?;
-//     let payload = payload.to_bytes();
-
-//     Ok(Response::builder()
-//         .status(StatusCode::NOT_FOUND)
-//         .body(Empty::new().map_err(|never| match never {}).boxed())?)
-// }
-
-use std::{any::Any, future::Future, marker::PhantomData, pin::Pin};
-
-use axum::{
-    body::Body,
-    response::Response,
-    routing::{delete, get, patch, post, put},
-    Router,
+use axum::body::Body;
+use axum::response::Response;
+use axum::routing::{
+    delete,
+    get,
+    patch,
+    post,
+    put,
 };
+use axum::Router;
 use bytes::Bytes;
-use http::{header, Extensions};
+use http::{
+    header,
+    Extensions,
+};
 use http_body_util::BodyExt;
 
-use crate::{
-    core::*,
-    err::{PayloadError, RequestValidationError},
-    internal::utils,
+use crate::core::*;
+use crate::err::{
+    RequestValidationError,
+    SecurityError,
 };
+use crate::internal::utils;
 
-pub fn add_route<Q, H, P, C, B, R>(
-    app: Router,
-    path: &str,
-    endpoint: Endpoint<Q, H, P, C, B, R>,
-) -> Router
+pub fn add_route<Q, H, P, C, B, R>(app: Router, path: &str, endpoint: Endpoint<Q, H, P, C, B, R>) -> Router
 where
     Q: DataTransferObject + 'static,
     H: DataTransferObject + 'static,
@@ -63,6 +49,7 @@ where
     } else if path.starts_with("delete:") {
         app = app.route(&path[7..], delete(endpoint));
     } else {
+        panic!("Invalid method");
     }
 
     app
@@ -80,18 +67,26 @@ where
     type Future = Pin<Box<dyn Future<Output = Response> + Send>>;
 
     fn call(self, req: axum::extract::Request, state: S) -> Self::Future {
-        let undefined_type = PhantomData::<()>::default().type_id();
-
         Box::pin(async move {
-            let (parts, body) = req.into_parts();
+            let undefined_type = PhantomData::<()>::default().type_id();
 
-            let body = body.collect().await.unwrap();
-            let body = body.to_bytes();
+            let req = {
+                let (parts, body) = req.into_parts();
 
-            let extentions = Extensions::new();
+                let body = match body.collect().await {
+                    Ok(body) => body.to_bytes(),
+                    Err(err) => return utils::handle_internal_error(err),
+                };
+
+                http::Request::from_parts(parts, body)
+            };
+
+            let mut extentions = Extensions::new();
 
             for security in &self.security {
-                // TODO: add security validation
+                if let Err(err) = (security.handler)(&req, &mut extentions).await {
+                    return err.try_into().map_or_else(utils::handle_internal_error, identity);
+                }
             }
 
             let mut validation_errors = RequestValidationError::default();
@@ -99,8 +94,7 @@ where
             let validated_req = Request {
                 queries: {
                     if self.parameters.query.type_id() != undefined_type {
-                        parts
-                            .uri
+                        req.uri()
                             .query()
                             .map(|qs| {
                                 let qs: serde_json::Value = serde_qs::from_str(qs).unwrap();
@@ -116,7 +110,7 @@ where
                 },
                 headers: {
                     if self.parameters.header.type_id() != undefined_type {
-                        let json_headers = utils::headers_to_json(&parts.headers).to_string();
+                        let json_headers = utils::headers_to_json(req.headers()).to_string();
 
                         H::validate_and_transform(json_headers.as_bytes())
                             .map_err(|e| validation_errors.headers = Some(e))
@@ -129,7 +123,7 @@ where
                     // TODO: extract path params
 
                     if self.parameters.path.type_id() != undefined_type {
-                        P::validate_and_transform(&body)
+                        P::validate_and_transform(req.body())
                             .map_err(|e| validation_errors.params = Some(e))
                             .ok()
                     } else {
@@ -140,8 +134,7 @@ where
                     if self.parameters.cookie.type_id() != undefined_type {
                         // TODO: cookie parsing to json
 
-                        parts
-                            .headers
+                        req.headers()
                             .get(header::COOKIE)
                             .map(|v| {
                                 C::validate_and_transform(v.as_bytes())
@@ -155,7 +148,7 @@ where
                 },
                 body: {
                     if self.request_body.type_id() != undefined_type {
-                        B::validate_and_transform(&body)
+                        B::validate_and_transform(req.body())
                             .map_err(|e| validation_errors.body = Some(e))
                             .ok()
                     } else {
@@ -168,7 +161,9 @@ where
 
             let result = (self.handler)(validated_req, extentions).await;
 
-            let response = result.try_into().unwrap();
+            // TODO: validate output payload
+
+            let response = result.try_into().map_or_else(utils::handle_internal_error, identity);
 
             response
         })
@@ -181,8 +176,7 @@ impl<B: DataTransferObject> TryInto<Response<Body>> for HTTPResponse<B> {
     fn try_into(self) -> Result<Response<Body>, Self::Error> {
         let resp_builder = Response::builder().status(self.status);
 
-        let mut resp_builder =
-            resp_builder.header(header::CONTENT_TYPE, B::encoding_content_type().to_string());
+        let mut resp_builder = resp_builder.header(header::CONTENT_TYPE, B::encoding_content_type().to_string());
 
         for (key, value) in self.headers {
             if let Some(key) = key {
@@ -192,11 +186,28 @@ impl<B: DataTransferObject> TryInto<Response<Body>> for HTTPResponse<B> {
 
         let resp_builder = resp_builder.body(
             self.body
-                .map(|b| b.into_bytes().map(Body::from).map_err(|e| String::new()))
+                .map(|b| b.into_bytes().map(Body::from).map_err(|err| format!("{err:?}")))
                 .transpose()?
                 .unwrap_or_default(),
         );
 
         resp_builder.map_err(|e| e.to_string())
+    }
+}
+
+impl TryInto<Response<Body>> for SecurityError {
+    type Error = String;
+
+    fn try_into(self) -> Result<Response<Body>, Self::Error> {
+        let mut json_body = serde_json::Map::with_capacity(2);
+
+        json_body.insert("code".into(), self.status.as_u16().into());
+        json_body.insert("message".into(), self.message.into());
+
+        Response::builder()
+            .status(self.status)
+            .header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
+            .body(Body::from(serde_json::Value::Object(json_body).to_string()))
+            .map_err(|err| err.to_string())
     }
 }

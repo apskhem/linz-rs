@@ -1,3 +1,5 @@
+use http::StatusCode;
+
 #[derive(Debug)]
 pub struct ValidationFieldError {
     pub kind: jsonschema::error::ValidationErrorKind,
@@ -39,7 +41,11 @@ impl RequestValidationError {
             || self.body.is_some()
     }
 
-    pub fn into_response() {
-        
-    }
+    pub fn into_response() {}
+}
+
+#[derive(Debug)]
+pub struct SecurityError {
+    pub status: StatusCode,
+    pub message: String,
 }

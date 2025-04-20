@@ -1,10 +1,15 @@
 use core::DataTransferObject;
-use std::{any::Any, marker::PhantomData, sync::Arc};
+use std::any::Any;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
 use axum::Router;
 use http::StatusCode;
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize,
+    Serialize,
+};
 
 pub mod adapter;
 pub mod core;
