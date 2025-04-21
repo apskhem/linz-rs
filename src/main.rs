@@ -16,6 +16,7 @@ pub mod core;
 pub mod err;
 pub mod internal;
 pub mod json_builder;
+pub mod security;
 
 const EMAIL_REGEX: &str = r"^[\w\.-]+@[\w\.-]+\.\w+$";
 

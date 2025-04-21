@@ -5,6 +5,10 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 
 use axum::body::Body;
+use axum::extract::{
+    FromRequestParts,
+    RawPathParams,
+};
 use axum::response::Response;
 use axum::routing::{
     delete,
@@ -18,6 +22,7 @@ use bytes::Bytes;
 use http::{
     header,
     Extensions,
+    StatusCode,
 };
 use http_body_util::BodyExt;
 
@@ -63,6 +68,7 @@ where
     C: DataTransferObject + 'static,
     B: DataTransferObject + 'static,
     R: DataTransferObject + 'static,
+    S: Send + Sync + 'static,
 {
     type Future = Pin<Box<dyn Future<Output = Response> + Send>>;
 
@@ -70,8 +76,14 @@ where
         Box::pin(async move {
             let undefined_type = PhantomData::<()>::default().type_id();
 
+            let raw_params;
             let req = {
-                let (parts, body) = req.into_parts();
+                let (mut parts, body) = req.into_parts();
+
+                raw_params = match RawPathParams::from_request_parts(&mut parts, &state).await {
+                    Ok(raw) => raw,
+                    Err(err) => return utils::handle_response_error(StatusCode::BAD_REQUEST, err),
+                };
 
                 let body = match body.collect().await {
                     Ok(body) => body.to_bytes(),
@@ -84,7 +96,7 @@ where
             let mut extentions = Extensions::new();
 
             for security in &self.security {
-                if let Err(err) = (security.handler)(&req, &mut extentions).await {
+                if let Err(err) = security.authenticate(&req, &mut extentions).await {
                     return err.try_into().map_or_else(utils::handle_internal_error, identity);
                 }
             }
@@ -94,25 +106,22 @@ where
             let validated_req = Request {
                 queries: {
                     if self.parameters.query.type_id() != undefined_type {
-                        req.uri()
-                            .query()
-                            .map(|qs| {
-                                let qs: serde_json::Value = serde_qs::from_str(qs).unwrap();
+                        req.uri().query().and_then(|qs| {
+                            let qs: serde_json::Value = serde_qs::from_str(qs).unwrap();
 
-                                Q::validate_and_transform(qs.to_string().as_bytes())
-                                    .map_err(|e| validation_errors.queries = Some(e))
-                                    .ok()
-                            })
-                            .flatten()
+                            Q::validate_json_and_transform(qs)
+                                .map_err(|e| validation_errors.queries = Some(e))
+                                .ok()
+                        })
                     } else {
                         None
                     }
                 },
                 headers: {
                     if self.parameters.header.type_id() != undefined_type {
-                        let json_headers = utils::headers_to_json(req.headers()).to_string();
+                        let json_headers = utils::headers_to_json(req.headers());
 
-                        H::validate_and_transform(json_headers.as_bytes())
+                        H::validate_json_and_transform(json_headers)
                             .map_err(|e| validation_errors.headers = Some(e))
                             .ok()
                     } else {
@@ -120,10 +129,11 @@ where
                     }
                 },
                 params: {
-                    // TODO: extract path params
+                    let params: Vec<_> = raw_params.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+                    let params: serde_json::Value = serde_qs::from_str(&params.join("&")).unwrap();
 
                     if self.parameters.path.type_id() != undefined_type {
-                        P::validate_and_transform(req.body())
+                        P::validate_json_and_transform(params)
                             .map_err(|e| validation_errors.params = Some(e))
                             .ok()
                     } else {
@@ -132,16 +142,22 @@ where
                 },
                 cookies: {
                     if self.parameters.cookie.type_id() != undefined_type {
-                        // TODO: cookie parsing to json
-
                         req.headers()
                             .get(header::COOKIE)
-                            .map(|v| {
-                                C::validate_and_transform(v.as_bytes())
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| {
+                                let cookie = utils::parse_cookie(v);
+                                let cookie = serde_json::Value::Object(
+                                    cookie
+                                        .into_iter()
+                                        .map(|(k, v)| (k, serde_json::Value::String(v)))
+                                        .collect(),
+                                );
+
+                                C::validate_json_and_transform(cookie)
                                     .map_err(|e| validation_errors.cookies = Some(e))
                                     .ok()
                             })
-                            .flatten()
                     } else {
                         None
                     }
@@ -199,13 +215,28 @@ impl TryInto<Response<Body>> for SecurityError {
     type Error = String;
 
     fn try_into(self) -> Result<Response<Body>, Self::Error> {
+        let mut resp_status = StatusCode::UNAUTHORIZED;
         let mut json_body = serde_json::Map::with_capacity(2);
 
-        json_body.insert("code".into(), self.status.as_u16().into());
-        json_body.insert("message".into(), self.message.into());
+        match self {
+            SecurityError::Custom(msg) => {
+                json_body.insert("code".into(), resp_status.as_u16().into());
+                json_body.insert("message".into(), msg.as_str().into());
+            }
+            SecurityError::WithStatus((status, msg)) => {
+                resp_status = status;
+
+                json_body.insert("code".into(), status.as_u16().into());
+                json_body.insert("message".into(), msg.as_str().into());
+            }
+            _ => {
+                json_body.insert("code".into(), resp_status.as_u16().into());
+                json_body.insert("message".into(), self.to_string().into());
+            }
+        }
 
         Response::builder()
-            .status(self.status)
+            .status(resp_status)
             .header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
             .body(Body::from(serde_json::Value::Object(json_body).to_string()))
             .map_err(|err| err.to_string())

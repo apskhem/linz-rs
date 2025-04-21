@@ -1,3 +1,5 @@
+use core::fmt;
+
 use http::StatusCode;
 
 #[derive(Debug)]
@@ -44,8 +46,26 @@ impl RequestValidationError {
     pub fn into_response() {}
 }
 
-#[derive(Debug)]
-pub struct SecurityError {
-    pub status: StatusCode,
-    pub message: String,
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub enum SecurityError {
+    MissingAuthorizationHeader,
+    InvalidAuthorizationHeaderValue,
+    MissingTokenFromScheme,
+    InvalidScheme,
+    MissingApiKeyParameter,
+    InvalidUtf8HeaderValue,
+    WithStatus((StatusCode, String)),
+    Custom(String),
+}
+
+impl fmt::Display for SecurityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingAuthorizationHeader => f.write_str("Missing authorizaiton header"),
+            Self::InvalidAuthorizationHeaderValue => f.write_str("Invalid authorizaiton header value"),
+            Self::MissingTokenFromScheme => f.write_str("Missing authorizaiton token"),
+            Self::InvalidScheme => f.write_str("Invalid authorizaiton scheme"),
+            _ => f.write_str("Failed authentication"),
+        }
+    }
 }
