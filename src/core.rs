@@ -50,7 +50,7 @@ pub trait DataTransferObject: JsonSchema + DeserializeOwned + Serialize + Clone 
     }
 
     fn content_type_decoder(payload: &[u8]) -> Result<serde_json::Value, PayloadError> {
-        serde_json::from_slice(payload).map_err(PayloadError::InvalidData)
+        serde_json::from_slice(payload).map_err(|_| PayloadError::InvalidData)
     }
 
     fn validate_json_payload(payload: &serde_json::Value) -> Result<(), PayloadError> {
@@ -75,7 +75,7 @@ pub trait DataTransferObject: JsonSchema + DeserializeOwned + Serialize + Clone 
     fn validate_json_and_transform(payload: serde_json::Value) -> Result<Self, PayloadError> {
         Self::validate_json_payload(&payload)?;
 
-        Self::deserialize(payload).map_err(PayloadError::FailedDeserializing)
+        Self::deserialize(payload).map_err(|_| PayloadError::FailedDeserializing)
     }
 
     fn encoding_content_type() -> Mime {
@@ -83,7 +83,7 @@ pub trait DataTransferObject: JsonSchema + DeserializeOwned + Serialize + Clone 
     }
 
     fn content_type_encoder(self) -> Result<serde_json::Value, PayloadError> {
-        serde_json::to_value(self).map_err(PayloadError::FailedSerializing)
+        serde_json::to_value(self).map_err(|_| PayloadError::FailedSerializing)
     }
 
     fn into_bytes(self) -> Result<Vec<u8>, PayloadError> {

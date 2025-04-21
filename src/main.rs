@@ -75,9 +75,16 @@ fn main() {
 
     // let app = adapter::add_route(app, "get:/", tmp_endpoint);
 
-    println!("Hello, world!");
+    let payload = serde_json::json!({"username": "A", "age": 10});
+
+    if let Err(err::PayloadError::FailedValidating(err)) = User::validate_json_payload(&payload) {
+        let a = serde_json::to_value(err).unwrap();
+        println!("{}", serde_json::to_string_pretty(&a).unwrap());
+    }
+
     println!(
-        "{}",
-        tmp_endpoint.request_body.type_id() == PhantomData::<()>::default().type_id()
+        "{:?} {:?}",
+        tmp_endpoint.parameters.cookie.type_id(),
+        PhantomData::<()>::default().type_id()
     );
 }

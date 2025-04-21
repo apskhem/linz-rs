@@ -1,36 +1,51 @@
 use core::fmt;
 
 use http::StatusCode;
+use serde::Serialize;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct ValidationFieldError {
+    #[serde(skip_serializing)]
     pub kind: jsonschema::error::ValidationErrorKind,
-    pub path: String,
+    pub path: Vec<String>,
+    pub message: String,
 }
 
 impl From<jsonschema::ValidationError<'_>> for ValidationFieldError {
     fn from(value: jsonschema::ValidationError<'_>) -> Self {
+        let message = value.to_string();
+
         Self {
             kind: value.kind,
-            path: value.instance_path.to_string(),
+            path: value
+                .instance_path
+                .into_iter()
+                .map(|seg| seg.to_string())
+                .collect(),
+            message,
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub enum PayloadError {
-    InvalidData(serde_json::Error),
+    InvalidData,
     FailedValidating(Vec<ValidationFieldError>),
-    FailedDeserializing(serde_json::Error),
-    FailedSerializing(serde_json::Error),
+    FailedDeserializing,
+    FailedSerializing,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct RequestValidationError {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub queries: Option<PayloadError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<PayloadError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<PayloadError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cookies: Option<PayloadError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub body: Option<PayloadError>,
 }
 
@@ -42,8 +57,6 @@ impl RequestValidationError {
             || self.cookies.is_some()
             || self.body.is_some()
     }
-
-    pub fn into_response() {}
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
@@ -65,6 +78,8 @@ impl fmt::Display for SecurityError {
             Self::InvalidAuthorizationHeaderValue => f.write_str("Invalid authorizaiton header value"),
             Self::MissingTokenFromScheme => f.write_str("Missing authorizaiton token"),
             Self::InvalidScheme => f.write_str("Invalid authorizaiton scheme"),
+            Self::MissingApiKeyParameter => f.write_str("Missing API key parameter"),
+            Self::InvalidUtf8HeaderValue => f.write_str("Invalid UTF-8 header value"),
             _ => f.write_str("Failed authentication"),
         }
     }
