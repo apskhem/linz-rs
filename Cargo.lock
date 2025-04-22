@@ -484,6 +484,7 @@ dependencies = [
  "jsonschema",
  "mime",
  "oas3",
+ "regex",
  "schemars",
  "serde",
  "serde_json",

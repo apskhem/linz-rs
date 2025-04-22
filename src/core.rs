@@ -14,6 +14,7 @@ use http::{
     StatusCode,
 };
 use mime::Mime;
+use oas3::spec;
 use schemars::gen::*;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
@@ -102,7 +103,7 @@ where
     B: DataTransferObject,
     R: DataTransferObject,
 {
-    pub tags: Vec<oas3::spec::Tag>,
+    pub tags: Vec<spec::Tag>,
     pub summary: Option<String>,
     pub description: Option<String>,
     pub operation_id: String,

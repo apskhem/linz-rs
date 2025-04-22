@@ -11,11 +11,15 @@ use axum::extract::{
 };
 use axum::response::Response;
 use axum::routing::{
+    connect,
     delete,
     get,
+    head,
+    options,
     patch,
     post,
     put,
+    trace,
 };
 use axum::Router;
 use bytes::Bytes;
@@ -33,32 +37,57 @@ use crate::err::{
 };
 use crate::internal::utils;
 
-pub fn add_route<Q, H, P, C, B, R>(app: Router, path: &str, endpoint: Endpoint<Q, H, P, C, B, R>) -> Router
-where
-    Q: DataTransferObject + 'static,
-    H: DataTransferObject + 'static,
-    P: DataTransferObject + 'static,
-    C: DataTransferObject + 'static,
-    B: DataTransferObject + 'static,
-    R: DataTransferObject + 'static,
-{
+#[derive(Debug, Default, Clone)]
+pub struct CreateApiConfig {}
+
+pub fn create_api<S: Send + Sync + Clone + 'static>(
+    app: Router<S>,
+    endpoints: Vec<(impl ToString, impl axum::handler::Handler<Bytes, S>)>,
+    config: CreateApiConfig,
+) -> Result<Router<S>, String> {
     let mut app = app;
-    if path.starts_with("get:") {
-        app = app.route(&path[4..], get(endpoint));
-    } else if path.starts_with("post:") {
-        app = app.route(&path[5..], post(endpoint));
-    } else if path.starts_with("put:") {
-        app = app.route(&path[4..], put(endpoint));
-    } else if path.starts_with("patch:") {
-        app = app.route(&path[6..], patch(endpoint));
-    } else if path.starts_with("delete:") {
-        app = app.route(&path[7..], delete(endpoint));
-    } else {
-        panic!("Invalid method");
+
+    for (path, endpoint) in endpoints {
+        app = add_route(app, path.to_string().as_str(), endpoint)?;
     }
 
-    app
+    Ok(app)
 }
+
+fn add_route<S>(
+    app: Router<S>,
+    path: &str,
+    endpoint: impl axum::handler::Handler<Bytes, S>,
+) -> Result<Router<S>, String>
+where
+    S: Send + Sync + Clone + 'static,
+{
+    if utils::is_valid_path(path) {
+        return Err(format!("'{}' is not a valid path", path));
+    }
+
+    let mut p = path.splitn(2, ":");
+    let (Some(method), Some(path)) = (p.next(), p.next()) else {
+        return Err(format!("'{}' is not a valid path", path));
+    };
+
+    let app = match method {
+        "get" => app.route(path, get(endpoint)),
+        "post" => app.route(path, post(endpoint)),
+        "put" => app.route(path, put(endpoint)),
+        "patch" => app.route(path, patch(endpoint)),
+        "delete" => app.route(path, delete(endpoint)),
+        "connect" => app.route(path, connect(endpoint)),
+        "head" => app.route(path, head(endpoint)),
+        "options" => app.route(path, options(endpoint)),
+        "trace" => app.route(path, trace(endpoint)),
+        _ => return Err(format!("'{}' is not a valid method", method)),
+    };
+
+    Ok(app)
+}
+
+trait EndpointHandler<S: Send + Sync + 'static>: axum::handler::Handler<Bytes, S> + Sized {}
 
 impl<Q, H, P, C, B, R, S> axum::handler::Handler<Bytes, S> for Endpoint<Q, H, P, C, B, R>
 where

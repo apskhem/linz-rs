@@ -1,3 +1,5 @@
+use std::convert::identity;
+
 use axum::body::Body;
 use axum::response::Response;
 use bytes::Bytes;
@@ -7,6 +9,7 @@ use http::{
     HeaderValue,
     StatusCode,
 };
+use regex::Regex;
 use serde_json::Value;
 
 use crate::err::SecurityError;
@@ -95,4 +98,71 @@ pub(crate) fn parse_cookie(cookie_header: &str) -> Vec<(String, String)> {
             }
         })
         .collect()
+}
+
+/// Validates whether a given string is a well-formed URL path.
+///
+/// The path must:
+/// - Prefix with an HTTP method (e.g., `get:`, `post:`, etc.)
+/// - Start with a `/`
+/// - Not contain a query (`?`) or fragment (`#`)
+///
+/// # Examples
+///
+/// ```
+/// assert!(is_valid_path("get:/users/123"));
+/// assert!(is_valid_path("get:/users/{user_id}"));
+/// assert!(!is_valid_path("users/123")); // does not start with `/`
+/// assert!(!is_valid_path("/users/123?query")); // contains query
+/// ```
+///
+/// # Parameters
+/// - `path`: The input string to validate as a path.
+///
+/// # Returns
+/// `true` if the path is valid; `false` otherwise.
+pub(crate) fn is_valid_path(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    if path.contains('?') || path.contains('#') {
+        return false;
+    }
+
+    [
+        path.starts_with("get:"),
+        path.starts_with("post:"),
+        path.starts_with("put:"),
+        path.starts_with("patch:"),
+        path.starts_with("delete:"),
+        path.starts_with("connect:"),
+        path.starts_with("head:"),
+        path.starts_with("options:"),
+        path.starts_with("trace:"),
+    ]
+    .into_iter()
+    .any(identity)
+}
+
+/// Replaces consecutive forward slashes in a string with a single slash.
+///
+/// This function is useful for normalizing URL or file paths by collapsing
+/// multiple consecutive slashes (`///`) into a single slash (`/`).
+///
+/// # Examples
+///
+/// ```
+/// let input = "///a//b////c/";
+/// let result = collapse_slashes(input);
+/// assert_eq!(result, "/a/b/c/");
+/// ```
+///
+/// # Parameters
+/// - `input`: The input string to normalize.
+///
+/// # Returns
+/// A new `String` with all consecutive slashes replaced by a single slash.
+pub(crate) fn collapse_slashes(input: &str) -> String {
+    let re = Regex::new(r"/+").unwrap();
+    re.replace_all(input, "/").to_string()
 }

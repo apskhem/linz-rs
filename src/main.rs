@@ -14,6 +14,7 @@ use serde::{
 pub mod adapter;
 pub mod core;
 pub mod err;
+pub mod grouping;
 pub mod internal;
 pub mod json_builder;
 pub mod security;
@@ -73,6 +74,12 @@ fn main() {
         handler: Arc::new(|req, ext| Box::pin(async { core::HTTPResponse::<()>::default() })),
     };
 
+    let app = adapter::create_api(
+        app,
+        vec![("get:/users/{user_id}", tmp_endpoint)],
+        adapter::CreateApiConfig::default(),
+    );
+
     // let app = adapter::add_route(app, "get:/", tmp_endpoint);
 
     let payload = serde_json::json!({"username": "A", "age": 10});
@@ -82,9 +89,9 @@ fn main() {
         println!("{}", serde_json::to_string_pretty(&a).unwrap());
     }
 
-    println!(
+    /* println!(
         "{:?} {:?}",
         tmp_endpoint.parameters.cookie.type_id(),
         PhantomData::<()>::default().type_id()
-    );
+    ); */
 }

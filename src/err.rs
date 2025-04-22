@@ -17,11 +17,7 @@ impl From<jsonschema::ValidationError<'_>> for ValidationFieldError {
 
         Self {
             kind: value.kind,
-            path: value
-                .instance_path
-                .into_iter()
-                .map(|seg| seg.to_string())
-                .collect(),
+            path: value.instance_path.into_iter().map(|seg| seg.to_string()).collect(),
             message,
         }
     }
