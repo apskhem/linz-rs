@@ -84,7 +84,6 @@ pub use oas3::spec as oas;
 pub use crate::adapter::{
     CorsConfig,
     CreateApiConfig,
-    DEFAULT_MAX_BODY_SIZE,
     DocsConfig,
     DocsViewer,
     FallbackHandler,

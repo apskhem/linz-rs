@@ -31,8 +31,7 @@ The first release: a Rust port of [Linz](https://github.com/apskhem/linz) on top
   scopes and typed access to their results (`Context::extension`).
 - OpenAPI 3.1 document generation (`build_json`), served by `create_api` with Scalar, Swagger UI,
   Redoc, RapiDoc or Stoplight Elements.
-- `create_api` options for CORS, logging, a fallback handler and a request body limit
-  (2 MiB by default).
+- `create_api` options for CORS, logging and a fallback handler.
 - Registration checks reported as `LinzError`: invalid routes, duplicate routes or operation
   IDs, and path parameters that do not match the path type.
 

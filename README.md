@@ -70,7 +70,6 @@ See `examples/bootstrap.rs` for a complete example (`cargo run --example bootstr
 - Handlers can read the router state (`Router::with_state`) through `Context::state`.
 - Registration fails early (`LinzError`) on invalid keys, duplicate routes or operation IDs,
   and path parameters that do not match the path type.
-- Request bodies are limited to 2 MiB by default (`413` beyond).
 - Without an explicit status, `post` endpoints respond `201` and others `200`.
 - Errors returned as `ApiError` are rendered as `{ "errors": [...] }` with their status.
 - Unmatched requests respond `404` (`Cannot find <METHOD> <path>`), after an optional

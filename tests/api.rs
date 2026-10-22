@@ -885,31 +885,6 @@ fn documents_all_securities_as_one_requirement() {
     );
 }
 
-#[tokio::test]
-async fn limits_body_size() {
-    let config = |max_body_size| {
-        CreateApiConfig {
-            max_body_size,
-            ..Default::default()
-        }
-    };
-    let big = json!({ "echo": "x".repeat(64) });
-
-    let app = create_api(Router::new(), endpoints(), config(Some(32))).unwrap();
-    let (status, body) = send_json(app, post_json("/echo/simple/body", big.clone())).await;
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(
-        body,
-        json!({ "errors": [{ "detail": "Request body exceeds the limit of 32 bytes" }] })
-    );
-
-    let app = create_api(Router::new(), endpoints(), config(None)).unwrap();
-    let (status, _) = send_json(app, post_json("/echo/simple/body", big)).await;
-    assert_eq!(status, StatusCode::CREATED);
-
-    assert_eq!(CreateApiConfig::default().max_body_size, Some(DEFAULT_MAX_BODY_SIZE));
-}
-
 fn api_users() -> Api<AppState> {
     Api::<AppState>::new()
         .get(

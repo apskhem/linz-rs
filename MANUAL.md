@@ -468,7 +468,7 @@ strings, which is coerced and then validated against the same schema.
   `400 Unknown encoding: <name>`.
 - **`text/plain` and `text/html` request bodies** are not parsed, so they respond `415`. Use
   those kinds for responses.
-- **Size**: bodies larger than `CreateApiConfig::max_body_size` (2 MiB by default) respond `413`.
+- **Size**: request bodies are not limited. Enforce a limit in a reverse proxy or API gateway.
 
 ### 6.2 Optional and empty bodies
 
@@ -973,7 +973,6 @@ where
 | `docs` | `None` | See [11.2](#112-serving-the-docs). |
 | `logger` | `None` | `Arc<dyn Logger>` (see [12.2](#122-logger)). |
 | `fallback_handler` | `None` | Called for unmatched requests. Return `Some(response)` to handle the request, or `None` to fall through to the 404. |
-| `max_body_size` | `Some(DEFAULT_MAX_BODY_SIZE)` (2 MiB) | The maximum request body size in bytes. Larger bodies respond `413`. `None` removes the limit. |
 
 ### 12.2 Logger
 
@@ -1162,7 +1161,7 @@ Api::new().post(
 ```
 
 To accept a raw binary body instead, use `.request_body(OctetStreamBody::new())`. Then
-`req.body` is a `File`. Uploads larger than 2 MiB need a higher `max_body_size`.
+`req.body` is a `File`.
 
 ### 13.4 Return a file (download)
 
@@ -1309,7 +1308,6 @@ let app = create_api(app, api, config)?
   axum ("Cannot merge two `Router`s that both have a fallback"). Use `nest`, or add the routes
   before `create_api`.
 - Prefer the `fallback_handler` option over `Router::fallback` (see [13.12](#1312-custom-handling-of-unmatched-requests)).
-- The request body limit is built in (`max_body_size`). No extra layer is needed for it.
 
 ### 13.12 Custom handling of unmatched requests
 
@@ -1443,7 +1441,7 @@ impl From<DbError> for ApiError {
 
 For every request that matches an endpoint:
 
-1. **Collect the body** into memory, up to `max_body_size` (otherwise `413`).
+1. **Collect the body** into memory.
 2. **Parse the body** by `Content-Type`. An empty body becomes `null`. An unparsable body
    responds `400`, and an unsupported content type responds `415`.
 3. **Authenticate**: each applied security runs in order. The first failure responds with its
@@ -1494,8 +1492,8 @@ preflight requests are answered by the CORS layer before routing.
 
 **Request handling**
 
-- Bodies are buffered in memory, up to `max_body_size` (2 MiB by default). Raise it for upload
-  endpoints, or set `None` and add your own limit.
+- Bodies are buffered in memory without a size limit. Enforce one in a reverse proxy or API
+  gateway in front of the server.
 - The body is parsed even for endpoints that declare no body. A non-empty body with an
   unsupported content type responds `415`, as in Linz.
 - Repeated query, form and cookie keys keep only their last value. There is no multi-value
@@ -1543,7 +1541,6 @@ preflight requests are answered by the CORS layer before routing.
 | Coercion | only with `z.coerce` | automatic for textual inputs, guided by the schema |
 | Header DTO names | lower-case keys | matched case-insensitively |
 | Multi-value query/form options | `multiValueQueryString` (the form options were never applied) | removed; the last occurrence always wins |
-| Body size | unlimited | 2 MiB by default (`413`), configurable |
 | Registration errors | thrown `Error`s | `LinzError` enum; path parameters are checked against the path type |
 | OpenAPI document | `buildJson(...)` passed to `createApi` | built by `create_api` from `DocsConfig::spec`; `build_json` remains for exports |
 | Path params | `:name` | `:name` or `{name}` |
@@ -1572,7 +1569,6 @@ preflight requests are answered by the CORS layer before routing.
 | 400 | `{"errors":[{"detail":"Unknown encoding: <charset>"}]}` | Unsupported charset |
 | 401 | `{"errors":[{"detail":"Missing authorization header"}]}` | See [9.2](#92-token-extraction) for all messages |
 | 404 | `{"errors":[{"detail":"Cannot find <METHOD> <path>"}]}` | No route (or wrong method) |
-| 413 | `{"errors":[{"detail":"Request body exceeds the limit of <N> bytes"}]}` | Body larger than `max_body_size` |
 | 415 | `{"errors":[{"detail":"'<type>' content type is not supported"}]}` | Unsupported request content type |
 | 500 | `{"errors":[{"detail":"Internal server error"}]}` | Undeclared response status, or invalid output |
 | 500 | `{"errors":[{"detail":"Missing request extension `<type>`"}]}` | `ctx.extension::<T>()` found nothing |

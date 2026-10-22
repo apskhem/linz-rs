@@ -26,11 +26,7 @@ use http::{
     StatusCode,
     header,
 };
-use http_body_util::{
-    BodyExt,
-    LengthLimitError,
-    Limited,
-};
+use http_body_util::BodyExt;
 use serde_json::Value;
 use tower_http::cors::{
     AllowHeaders,
@@ -158,11 +154,8 @@ pub struct DocsConfig {
 /// A handler for requests that match no route. Returning `None` responds with `404 Not Found`.
 pub type FallbackHandler = Arc<dyn Fn(axum::extract::Request) -> BoxFuture<Option<Response>> + Send + Sync>;
 
-/// The default of [`CreateApiConfig::max_body_size`]: 2 MiB, like axum's `DefaultBodyLimit`.
-pub const DEFAULT_MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
-
 /// Configurations of [`create_api`].
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CreateApiConfig {
     /// CORS configurations.
     pub cors: Option<CorsConfig>,
@@ -172,26 +165,10 @@ pub struct CreateApiConfig {
     pub logger: Option<Arc<dyn Logger>>,
     /// Called for requests that match no route, before the JSON `404` response.
     pub fallback_handler: Option<FallbackHandler>,
-    /// The maximum size of request bodies in bytes; larger bodies respond `413`.
-    /// Defaults to [`DEFAULT_MAX_BODY_SIZE`]. `None` removes the limit.
-    pub max_body_size: Option<usize>,
-}
-
-impl Default for CreateApiConfig {
-    fn default() -> Self {
-        Self {
-            cors: None,
-            docs: None,
-            logger: None,
-            fallback_handler: None,
-            max_body_size: Some(DEFAULT_MAX_BODY_SIZE),
-        }
-    }
 }
 
 struct Shared {
     logger: Option<Arc<dyn Logger>>,
-    max_body_size: Option<usize>,
 }
 
 impl Shared {
@@ -232,7 +209,6 @@ where
 
     let shared = Arc::new(Shared {
         logger: config.logger.clone(),
-        max_body_size: config.max_body_size,
     });
 
     shared.info(&format!("Registering {} endpoints...", endpoints.len()));
@@ -425,30 +401,11 @@ async fn process<S>(
             .collect(),
     );
 
-    let body = match shared.max_body_size {
-        Some(limit) => {
-            Limited::new(body, limit)
-                .collect()
-                .await
-                .map_err(|err| {
-                    if err.downcast_ref::<LengthLimitError>().is_some() {
-                        Failure::BodyParser(BodyParserError::new(
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            format!("Request body exceeds the limit of {limit} bytes"),
-                        ))
-                    } else {
-                        Failure::Internal(err.to_string())
-                    }
-                })?
-                .to_bytes()
-        }
-        None => {
-            body.collect()
-                .await
-                .map_err(|e| Failure::Internal(e.to_string()))?
-                .to_bytes()
-        }
-    };
+    let body = body
+        .collect()
+        .await
+        .map_err(|e| Failure::Internal(e.to_string()))?
+        .to_bytes();
     let content_type = parts
         .headers
         .get(header::CONTENT_TYPE)
