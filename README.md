@@ -56,7 +56,15 @@ let app = create_api(Router::new(), Api::new().nest("/v1", api), CreateApiConfig
 })?;
 ```
 
-See `examples/bootstrap.rs` for a complete example (`cargo run --example bootstrap`).
+`examples/bootstrap/` is a starter project to copy for a new service: a task tracker with
+bearer-token auth, validation, pagination, file attachments, shared state, domain errors and
+end-to-end tests, split into modules.
+
+```console
+$ cargo run --example bootstrap                            # serve; docs at http://localhost:3000/docs
+$ cargo run --example bootstrap -- openapi > openapi.json  # print the OpenAPI document
+$ cargo test --example bootstrap                           # run its tests
+```
 
 ## Behavior
 

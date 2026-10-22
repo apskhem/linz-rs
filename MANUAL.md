@@ -173,8 +173,15 @@ $ curl -s localhost:3000/nope
 {"errors":[{"detail":"Cannot find GET /nope"}]}
 ```
 
-Open `http://localhost:3000/docs` for the API reference. `examples/bootstrap.rs` is a complete
-example (`cargo run --example bootstrap`).
+Open `http://localhost:3000/docs` for the API reference. `examples/bootstrap/` is a starter
+project that puts the features of this manual together, laid out in modules to copy into a new
+crate:
+
+```console
+$ cargo run --example bootstrap                            # serve the API and its docs
+$ cargo run --example bootstrap -- openapi > openapi.json  # print the OpenAPI document
+$ cargo test --example bootstrap                           # run its tests
+```
 
 ---
 
@@ -915,6 +922,9 @@ let api = api();
 let document = build_json(&BuilderConfig::new("My API", "1.0.0"), api.endpoints())?;
 std::fs::write("openapi.json", serde_json::to_string_pretty(&document)?)?;
 ```
+
+`examples/bootstrap/main.rs` wires this into an `openapi` subcommand, so the document can be
+exported without starting the server: `cargo run --example bootstrap -- openapi > openapi.json`.
 
 ### 11.4 What is generated
 

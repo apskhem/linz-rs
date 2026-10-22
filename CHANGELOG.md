@@ -8,6 +8,12 @@ minor releases (0.x.0) may contain breaking changes.
 
 ## [Unreleased]
 
+### Changed
+
+- `examples/bootstrap` is now a starter project for new services: a task tracker with
+  bearer-token auth, validation, pagination, file attachments, shared state, domain errors
+  and end-to-end tests, split into modules.
+
 ## [0.1.0] - 2026-10-22
 
 The first release: a Rust port of [Linz](https://github.com/apskhem/linz) on top of axum.
