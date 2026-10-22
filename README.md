@@ -3,6 +3,18 @@
 A Rust port of [Linz](https://github.com/apskhem/linz): a web framework on top of
 [axum](https://github.com/tokio-rs/axum) with first-class OpenAPI documentation support.
 
+## Installation
+
+```toml
+[dependencies]
+linz-rs = "0.1"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+```
+
+Requires Rust 1.88 or newer (edition 2024). The API may change in 0.x minor releases; see
+[CHANGELOG.md](CHANGELOG.md).
+
 ## Usage
 
 ```rust

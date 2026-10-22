@@ -924,7 +924,8 @@ For every endpoint that is not hidden:
 - **Operation**:
   - `tags`, `summary` (defaults to the operation ID), `description`, `operationId`,
     `deprecated`.
-  - `security`: one requirement object per applied security.
+  - `security`: a single requirement object listing every applied security and its scopes,
+    because all of them are required.
   - `parameters`: one entry per property of the query, header, path and cookie DTOs. Each
     entry has `in`, `required` (for non-optional fields), the property `description`, and the
     property schema with `$ref`s resolved.
@@ -1512,9 +1513,9 @@ preflight requests are answered by the CORS layer before routing.
 
 **Security**
 
-- Multiple securities on one endpoint are **all required** at runtime, but the OpenAPI document
-  lists them as alternatives (separate requirement objects, which means OR). This matches Linz.
-  If you need "any of", implement it inside one security handler.
+- Multiple securities on one endpoint are **all required**, and the OpenAPI document lists
+  them in one requirement object (AND). There is no "any of" (OR) mode; implement it inside one
+  security handler if you need it.
 - Security handlers do not receive the router state. Capture what they need in the closure.
 - Error responses from security handlers are not limited to 401. Return any status (for example
   403 for missing scopes).
@@ -1538,6 +1539,7 @@ preflight requests are answered by the CORS layer before routing.
 | Handler context | `{ extensions, req, res, security }` | `Context { state, extensions, request: Parts, security }`, plus `ctx.extension::<T>()`. Streaming replaces writing to `res`. |
 | State | none (module scope) | the axum router state, as `ctx.state` |
 | Security handler | `(req, scopes, extensions) => Promise<void>` that throws | `Fn(Credentials) -> Future<Result<Extensions, ApiError>>`, with the token extracted for you |
+| Multiple securities in the docs | one requirement object each (OR), although all are required | one requirement object (AND), matching the runtime |
 | Coercion | only with `z.coerce` | automatic for textual inputs, guided by the schema |
 | Header DTO names | lower-case keys | matched case-insensitively |
 | Multi-value query/form options | `multiValueQueryString` (the form options were never applied) | removed; the last occurrence always wins |

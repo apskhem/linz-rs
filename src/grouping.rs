@@ -1,3 +1,5 @@
+//! Linz-style endpoint groups: [`merge_endpoint_groups`] and [`apply_group_config`].
+
 use std::collections::HashSet;
 
 use oas3::spec;
@@ -59,6 +61,7 @@ pub struct GroupConfig {
 }
 
 impl GroupConfig {
+    /// Creates an empty configuration.
     pub fn new() -> Self {
         Self::default()
     }
@@ -75,11 +78,13 @@ impl GroupConfig {
         self
     }
 
+    /// Hides the endpoints that do not set `hidden` themselves from the docs.
     pub fn hidden(mut self, hidden: bool) -> Self {
         self.hidden = Some(hidden);
         self
     }
 
+    /// Marks the endpoints that do not set `deprecated` themselves as deprecated.
     pub fn deprecated(mut self, deprecated: bool) -> Self {
         self.deprecated = Some(deprecated);
         self

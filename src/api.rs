@@ -1,3 +1,5 @@
+//! The [`Api`] route builder.
+
 use std::fmt;
 use std::future::Future;
 
@@ -119,6 +121,7 @@ impl<S: Send + 'static> Api<S> {
         delete => Delete,
     }
 
+    /// Creates an empty builder.
     pub fn new() -> Self {
         Self::default()
     }
@@ -183,6 +186,7 @@ impl<S: Send + 'static> Api<S> {
         &self.endpoints
     }
 
+    /// Returns the `method:path` keys and endpoints.
     pub fn into_endpoints(self) -> LinzEndpointGroup<S> {
         self.endpoints
     }

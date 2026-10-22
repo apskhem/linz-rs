@@ -3,6 +3,13 @@ name = "linz-rs"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
+description = "A web framework on top of axum with first-class OpenAPI documentation support, ported from Linz"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/apskhem/linz-rs"
+readme = "README.md"
+keywords = ["openapi", "axum", "web", "validation", "json-schema"]
+categories = ["web-programming::http-server", "api-bindings"]
+include = ["src/**/*", "examples/**/*", "tests/**/*", "README.md", "MANUAL.md", "CHANGELOG.md", "LICENSE-*"]
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = [] }

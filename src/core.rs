@@ -1,3 +1,5 @@
+//! Endpoint declarations: [`Endpoint`], request and response bodies, [`HttpResponse`] and [`Context`].
+
 use std::any::TypeId;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -52,11 +54,17 @@ pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 /// Supported HTTP methods of endpoints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum HttpMethod {
+    /// `GET`
     Get,
+    /// `POST`
     Post,
+    /// `PUT`
     Put,
+    /// `PATCH`
     Patch,
+    /// `DELETE`
     Delete,
 }
 
@@ -70,6 +78,7 @@ pub const METHODS: [HttpMethod; 5] = [
 ];
 
 impl HttpMethod {
+    /// The lower-case name, e.g. `get`.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Get => "get",
@@ -80,6 +89,7 @@ impl HttpMethod {
         }
     }
 
+    /// Parses a lower-case method name, e.g. `get`.
     pub fn parse(method: &str) -> Option<Self> {
         METHODS.into_iter().find(|m| m.as_str() == method)
     }
@@ -94,6 +104,7 @@ impl HttpMethod {
         }
     }
 
+    /// Converts into an [`http::Method`].
     pub fn to_method(&self) -> Method {
         match self {
             Self::Get => Method::GET,
@@ -131,6 +142,7 @@ pub struct TypeSchema {
 }
 
 impl TypeSchema {
+    /// The schema of `T`.
     pub fn of<T: JsonSchema + ?Sized + 'static>() -> Self {
         Self {
             docs: |generator| T::_schemars_private_non_optional_json_schema(generator),
@@ -161,12 +173,16 @@ impl fmt::Debug for TypeSchema {
 /// It can only be (de)serialized as part of [`FormDataBody`] or [`OctetStreamBody`] payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct File {
+    /// The filename of a multipart part, if any.
     pub name: Option<String>,
+    /// The `Content-Type` of the multipart part or body, if any.
     pub content_type: Option<String>,
+    /// The content.
     pub data: Bytes,
 }
 
 impl File {
+    /// Creates a file without name and content type.
     pub fn new(data: impl Into<Bytes>) -> Self {
         Self {
             data: data.into(),
@@ -174,11 +190,13 @@ impl File {
         }
     }
 
+    /// Sets the filename.
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
 
+    /// Sets the content type.
     pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
         self.content_type = Some(content_type.into());
         self
@@ -226,6 +244,7 @@ impl JsonSchema for File {
 
 /// The kind of payload of a request or response body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BodyKind {
     /// `application/json`
     Json,
@@ -242,6 +261,7 @@ pub enum BodyKind {
 }
 
 impl BodyKind {
+    /// The MIME type, e.g. `application/json`.
     pub fn mime_type(&self) -> &'static str {
         match self {
             Self::Json => "application/json",
@@ -263,38 +283,49 @@ impl BodyKind {
 /// `application/x-www-form-urlencoded` body.
 #[derive(Debug, Clone, Default)]
 pub struct EncodingItem {
+    /// The allowed content types of the property.
     pub content_type: Vec<String>,
+    /// The headers of a multipart part.
     pub headers: Option<TypeSchema>,
+    /// How the property is serialized, see the OpenAPI `style` values.
     pub style: Option<String>,
+    /// Whether arrays and objects generate separate parameters.
     pub explode: Option<bool>,
+    /// Whether reserved characters are allowed without percent-encoding.
     pub allow_reserved: Option<bool>,
 }
 
 impl EncodingItem {
+    /// Creates an empty encoding.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Sets the allowed content types of the property.
     pub fn content_type(mut self, content_types: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.content_type = content_types.into_iter().map(Into::into).collect();
         self
     }
 
+    /// Sets the headers of a multipart part, described by the fields of `H`.
     pub fn headers<H: JsonSchema + 'static>(mut self) -> Self {
         self.headers = Some(TypeSchema::of::<H>());
         self
     }
 
+    /// Sets the serialization style.
     pub fn style(mut self, style: impl Into<String>) -> Self {
         self.style = Some(style.into());
         self
     }
 
+    /// Sets whether arrays and objects generate separate parameters.
     pub fn explode(mut self, explode: bool) -> Self {
         self.explode = Some(explode);
         self
     }
 
+    /// Sets whether reserved characters are allowed without percent-encoding.
     pub fn allow_reserved(mut self, allow_reserved: bool) -> Self {
         self.allow_reserved = Some(allow_reserved);
         self
@@ -304,12 +335,17 @@ impl EncodingItem {
 /// The type-erased description of a request or response body.
 #[derive(Debug, Clone)]
 pub struct BodyDescriptor {
+    /// The content type of the body.
     pub kind: BodyKind,
+    /// The schema of the payload.
     pub schema: TypeSchema,
+    /// The description in the docs.
     pub description: Option<String>,
     /// Headers of a response (documentation only).
     pub headers: Option<TypeSchema>,
+    /// Documented examples, by name.
     pub examples: BTreeMap<String, spec::Example>,
+    /// The encoding of properties of form bodies, by property name.
     pub encoding: BTreeMap<String, EncodingItem>,
 }
 
@@ -343,6 +379,7 @@ impl<T> fmt::Debug for SenderBody<T> {
 }
 
 impl<T: JsonSchema + 'static> SenderBody<T> {
+    /// Creates a body of the given kind. Prefer the constructors such as [`JsonBody::new`].
     pub fn new(kind: BodyKind) -> Self {
         Self {
             descriptor: BodyDescriptor {
@@ -359,6 +396,7 @@ impl<T: JsonSchema + 'static> SenderBody<T> {
 }
 
 impl<T> SenderBody<T> {
+    /// Sets the description in the docs.
     pub fn describe(mut self, description: impl Into<String>) -> Self {
         self.descriptor.description = Some(description.into());
         self
@@ -370,6 +408,7 @@ impl<T> SenderBody<T> {
         self
     }
 
+    /// Sets documented examples, by name.
     pub fn set_examples(mut self, examples: impl IntoIterator<Item = (impl Into<String>, spec::Example)>) -> Self {
         self.descriptor.examples = examples.into_iter().map(|(k, v)| (k.into(), v)).collect();
         self
@@ -382,6 +421,7 @@ impl<T> SenderBody<T> {
         self
     }
 
+    /// The type-erased description of the body.
     pub fn descriptor(&self) -> &BodyDescriptor {
         &self.descriptor
     }
@@ -391,8 +431,10 @@ impl<T> SenderBody<T> {
 pub struct JsonBody;
 
 impl JsonBody {
+    /// `application/json`
     pub const MIME_TYPE: &'static str = "application/json";
 
+    /// A JSON body of type `T`.
     #[allow(clippy::new_ret_no_self)]
     pub fn new<T: JsonSchema + 'static>() -> SenderBody<T> {
         SenderBody::new(BodyKind::Json)
@@ -403,8 +445,10 @@ impl JsonBody {
 pub struct FormDataBody;
 
 impl FormDataBody {
+    /// `multipart/form-data`
     pub const MIME_TYPE: &'static str = "multipart/form-data";
 
+    /// A multipart body of type `T`. Use [`File`] for file fields.
     #[allow(clippy::new_ret_no_self)]
     pub fn new<T: JsonSchema + 'static>() -> SenderBody<T> {
         SenderBody::new(BodyKind::FormData)
@@ -415,8 +459,10 @@ impl FormDataBody {
 pub struct UrlEncodedBody;
 
 impl UrlEncodedBody {
+    /// `application/x-www-form-urlencoded`
     pub const MIME_TYPE: &'static str = "application/x-www-form-urlencoded";
 
+    /// A url-encoded body of type `T`.
     #[allow(clippy::new_ret_no_self)]
     pub fn new<T: JsonSchema + 'static>() -> SenderBody<T> {
         SenderBody::new(BodyKind::UrlEncoded)
@@ -427,8 +473,10 @@ impl UrlEncodedBody {
 pub struct OctetStreamBody;
 
 impl OctetStreamBody {
+    /// `application/octet-stream`
     pub const MIME_TYPE: &'static str = "application/octet-stream";
 
+    /// A binary body, represented by [`File`].
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> SenderBody<File> {
         SenderBody::new(BodyKind::OctetStream)
@@ -439,8 +487,10 @@ impl OctetStreamBody {
 pub struct TextBody;
 
 impl TextBody {
+    /// `text/plain`
     pub const MIME_TYPE: &'static str = "text/plain";
 
+    /// A plain-text body.
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> SenderBody<String> {
         SenderBody::new(BodyKind::Text)
@@ -451,8 +501,10 @@ impl TextBody {
 pub struct HtmlBody;
 
 impl HtmlBody {
+    /// `text/html`
     pub const MIME_TYPE: &'static str = "text/html";
 
+    /// An HTML body.
     #[allow(clippy::new_ret_no_self)]
     pub fn new() -> SenderBody<String> {
         SenderBody::new(BodyKind::Html)
@@ -461,6 +513,7 @@ impl HtmlBody {
 
 /// A declared response of an endpoint.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ResponseSpec {
     /// A response with a validated body.
     Body(BodyDescriptor),
@@ -478,6 +531,7 @@ pub enum ResponseSpec {
     note = "`true` or a description declares a JSON:API error response"
 )]
 pub trait IntoResponseSpec<R> {
+    /// Converts into a response declaration.
     fn into_response_spec(self) -> ResponseSpec;
 }
 
@@ -522,13 +576,18 @@ impl<T: Serialize + Send + 'static> ResponsePayload for T {}
 /// Schemas of the parameters of an endpoint.
 #[derive(Debug, Clone, Default)]
 pub struct ParameterSchemas {
+    /// The schema of the query DTO.
     pub query: Option<TypeSchema>,
+    /// The schema of the header DTO.
     pub header: Option<TypeSchema>,
+    /// The schema of the path DTO.
     pub path: Option<TypeSchema>,
+    /// The schema of the cookie DTO.
     pub cookie: Option<TypeSchema>,
 }
 
 impl ParameterSchemas {
+    /// Whether no parameter is declared.
     pub fn is_empty(&self) -> bool {
         self.query.is_none() && self.header.is_none() && self.path.is_none() && self.cookie.is_none()
     }
@@ -548,17 +607,27 @@ impl ParameterSchemas {
 /// Type-erased metadata of an endpoint.
 #[derive(Debug, Clone, Default)]
 pub struct EndpointMeta {
+    /// The tags in the docs.
     pub tags: Vec<spec::Tag>,
+    /// The summary in the docs.
     pub summary: Option<String>,
+    /// The description in the docs.
     pub description: Option<String>,
+    /// The unique operation ID.
     pub operation_id: String,
     /// Hides the endpoint from showing on the spec, but can still access.
     pub hidden: Option<bool>,
+    /// Whether the endpoint is deprecated in the docs.
     pub deprecated: Option<bool>,
+    /// The authentication steps, run in order.
     pub security: Vec<AppliedSecurity>,
+    /// The schemas of the parameters.
     pub parameters: ParameterSchemas,
+    /// The request body.
     pub request_body: Option<BodyDescriptor>,
+    /// The declared responses, by status.
     pub responses: BTreeMap<u16, ResponseSpec>,
+    /// The response for statuses without their own declaration.
     pub default_response: Option<BodyDescriptor>,
     /// The status used when the handler does not set one, set by [`Endpoint::returns`].
     /// Without it, `201` is used for `post` endpoints and `200` otherwise.
@@ -568,10 +637,15 @@ pub struct EndpointMeta {
 /// A validated incoming request passed to the endpoint handler.
 #[derive(Debug, Clone)]
 pub struct Request<Q = (), H = (), P = (), C = (), B = ()> {
+    /// The validated query string.
     pub queries: Q,
+    /// The validated headers.
     pub headers: H,
+    /// The validated path parameters.
     pub params: P,
+    /// The validated cookies.
     pub cookies: C,
+    /// The validated body.
     pub body: B,
 }
 
@@ -604,6 +678,7 @@ impl<S> Context<S> {
 
 /// Converts a tag name or an OpenAPI tag object into a tag.
 pub trait IntoTag {
+    /// Converts into a tag.
     fn into_tag(self) -> spec::Tag;
 }
 
@@ -630,8 +705,11 @@ impl IntoTag for String {
 }
 
 /// The payload of an [`HttpResponse`].
+#[non_exhaustive]
 pub enum ResponseBody<T> {
+    /// No body.
     Empty,
+    /// A body that is validated and serialized by the declared response.
     Data(T),
     /// A streamed body. It is neither validated nor serialized.
     Stream(Body),
@@ -652,12 +730,16 @@ impl<T: fmt::Debug> fmt::Debug for ResponseBody<T> {
 /// When `status` is not set, `201 Created` is used for `post` endpoints and `200 OK` otherwise.
 #[derive(Debug)]
 pub struct HttpResponse<T> {
+    /// The status. When `None`, see [`EndpointMeta::default_status`].
     pub status: Option<StatusCode>,
+    /// Extra headers. They replace the headers of the same name set by linz-rs.
     pub headers: HeaderMap,
+    /// The payload.
     pub body: ResponseBody<T>,
 }
 
 impl<T> HttpResponse<T> {
+    /// A response with the default status.
     pub fn new(body: T) -> Self {
         Self {
             status: None,
@@ -666,10 +748,12 @@ impl<T> HttpResponse<T> {
         }
     }
 
+    /// A response with the given status.
     pub fn with_status(status: StatusCode, body: T) -> Self {
         Self::new(body).status(status)
     }
 
+    /// A response without body.
     pub fn without_body(status: StatusCode, headers: Option<HeaderMap>) -> Self {
         Self {
             status: Some(status),
@@ -678,6 +762,7 @@ impl<T> HttpResponse<T> {
         }
     }
 
+    /// A streamed response. The body is neither validated nor serialized.
     pub fn stream(status: StatusCode, body: impl Into<Body>) -> Self {
         Self {
             status: Some(status),
@@ -686,11 +771,13 @@ impl<T> HttpResponse<T> {
         }
     }
 
+    /// Sets the status.
     pub fn status(mut self, status: StatusCode) -> Self {
         self.status = Some(status);
         self
     }
 
+    /// Sets a header.
     pub fn header(mut self, name: HeaderName, value: HeaderValue) -> Self {
         self.headers.insert(name, value);
         self
@@ -711,6 +798,7 @@ impl<T> From<T> for HttpResponse<T> {
     note = "the response type is set by `.returns(status, body)`"
 )]
 pub trait IntoHttpResponse<R> {
+    /// Converts into a response.
     fn into_http_response(self) -> HttpResponse<R>;
 }
 
@@ -825,14 +913,17 @@ impl<S> Clone for LinzEndpoint<S> {
 }
 
 impl<S> LinzEndpoint<S> {
+    /// The metadata of the endpoint.
     pub fn meta(&self) -> &EndpointMeta {
         &self.meta
     }
 
+    /// The metadata of the endpoint, e.g. to adjust it after building.
     pub fn meta_mut(&mut self) -> &mut EndpointMeta {
         &mut self.meta
     }
 
+    /// The operation ID of the endpoint.
     pub fn operation_id(&self) -> &str {
         &self.meta.operation_id
     }
@@ -860,6 +951,7 @@ pub struct Endpoint<Q = (), H = (), P = (), C = (), B = (), R = NoResponse> {
 type TypeMarker<Q, H, P, C, B, R> = PhantomData<fn() -> (Q, H, P, C, B, R)>;
 
 impl Endpoint {
+    /// Starts declaring an endpoint with a unique operation ID.
     pub fn new(operation_id: impl Into<String>) -> Self {
         Self {
             meta: EndpointMeta {
@@ -885,16 +977,19 @@ impl<Q, H, P, C, B, R> Endpoint<Q, H, P, C, B, R> {
         self
     }
 
+    /// Adds tags, given by name or as [`oas::Tag`](spec::Tag) objects.
     pub fn tags(mut self, tags: impl IntoIterator<Item = impl IntoTag>) -> Self {
         self.meta.tags.extend(tags.into_iter().map(IntoTag::into_tag));
         self
     }
 
+    /// Sets the summary in the docs. Defaults to the operation ID.
     pub fn summary(mut self, summary: impl Into<String>) -> Self {
         self.meta.summary = Some(summary.into());
         self
     }
 
+    /// Sets the description in the docs.
     pub fn description(mut self, description: impl Into<String>) -> Self {
         self.meta.description = Some(description.into());
         self
@@ -906,6 +1001,7 @@ impl<Q, H, P, C, B, R> Endpoint<Q, H, P, C, B, R> {
         self
     }
 
+    /// Marks the endpoint as deprecated in the docs.
     pub fn deprecated(mut self, deprecated: bool) -> Self {
         self.meta.deprecated = Some(deprecated);
         self
@@ -917,26 +1013,31 @@ impl<Q, H, P, C, B, R> Endpoint<Q, H, P, C, B, R> {
         self
     }
 
+    /// Validates the query string into `req.queries: T`.
     pub fn query<T: DataTransferObject>(mut self) -> Endpoint<T, H, P, C, B, R> {
         self.meta.parameters.query = Some(TypeSchema::of::<T>());
         self.retype()
     }
 
+    /// Validates the headers into `req.headers: T`. Field names match header names case-insensitively.
     pub fn header<T: DataTransferObject>(mut self) -> Endpoint<Q, T, P, C, B, R> {
         self.meta.parameters.header = Some(TypeSchema::of::<T>());
         self.retype()
     }
 
+    /// Validates the path parameters into `req.params: T`. Its fields must match the parameters of the path.
     pub fn path<T: DataTransferObject>(mut self) -> Endpoint<Q, H, T, C, B, R> {
         self.meta.parameters.path = Some(TypeSchema::of::<T>());
         self.retype()
     }
 
+    /// Validates the cookies into `req.cookies: T`.
     pub fn cookie<T: DataTransferObject>(mut self) -> Endpoint<Q, H, P, T, B, R> {
         self.meta.parameters.cookie = Some(TypeSchema::of::<T>());
         self.retype()
     }
 
+    /// Validates the request body into `req.body: T`.
     pub fn request_body<T: DataTransferObject>(mut self, body: SenderBody<T>) -> Endpoint<Q, H, P, C, T, R> {
         self.meta.request_body = Some(body.descriptor);
         self.retype()

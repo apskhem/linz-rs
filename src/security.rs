@@ -1,3 +1,5 @@
+//! Security schemes: [`Security`], [`AppliedSecurity`] and the token extraction per [`SecurityType`].
+
 use core::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -34,8 +36,11 @@ pub struct Credentials {
     pub token: Option<String>,
     /// The scopes required by the endpoint, see [`Security::apply`].
     pub scopes: Vec<String>,
+    /// The method of the request.
     pub method: Method,
+    /// The URI of the request.
     pub uri: Uri,
+    /// The headers of the request.
     pub headers: HeaderMap,
 }
 
@@ -67,6 +72,7 @@ impl fmt::Debug for Security {
 }
 
 impl Security {
+    /// Creates a security scheme named `name` (the key in the docs) with its authentication handler.
     pub fn new<F, Fut>(name: impl Into<String>, r#type: SecurityType, handler: F) -> Self
     where
         F: Fn(Credentials) -> Fut + Send + Sync + 'static,
@@ -80,6 +86,7 @@ impl Security {
         }
     }
 
+    /// Sets the description in the docs.
     pub fn describe(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
@@ -170,7 +177,9 @@ impl Security {
 /// A [`Security`] applied to an endpoint with its required scopes.
 #[derive(Clone, Debug)]
 pub struct AppliedSecurity {
+    /// The security scheme.
     pub security: Arc<Security>,
+    /// The required scopes.
     pub scopes: Vec<String>,
 }
 
@@ -235,7 +244,9 @@ fn extract_auth_header(headers: &HeaderMap, required_scheme: &str) -> Result<Str
 /// Represents the type of the security scheme.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 pub enum SecurityType {
+    /// HTTP authentication with the `Authorization` header.
     Http {
         /// The name of the HTTP Authentication scheme to be used
         /// in the Authorization header as defined in RFC7235.
@@ -247,46 +258,66 @@ pub enum SecurityType {
         /// E.g., "JWT"
         bearer_format: Option<String>,
     },
+    /// An API key in a header, query parameter or cookie.
     ApiKey {
         /// The name of the header, query or cookie parameter to be used.
         name: String,
         /// The location of the API key.
         r#in: In,
     },
+    /// OAuth 2.0, with a `Bearer` token.
     OAuth2 {
         /// An object containing configuration information for the flow types supported.
         flows: oauth2_flows::Security,
     },
+    /// OpenID Connect, with a `Bearer` token.
     OpenIdConnect {
         /// Well-known URL to discover the [[OpenID-Connect-Discovery]] provider metadata.
         open_id_connect_url: Url,
     },
+    /// Mutual TLS. No token is extracted.
     MutualTLS,
 }
 
 /// Represents authentication scheme registered in IANA Authentication Scheme registry.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum AuthenticationScheme {
+    /// RFC 7617
     Basic,
+    /// RFC 6750
     Bearer,
+    /// RFC 9729
     Concealed,
+    /// RFC 7616
     Digest,
+    /// RFC 9449
     DPoP,
+    /// RFC 9635
     GNAP,
+    /// RFC 7486
     HOBA,
+    /// RFC 8120
     Mutual,
+    /// RFC 4559
     Negotiate,
+    /// RFC 5849
     OAuth,
+    /// RFC 9577
     PrivateToken,
+    /// RFC 7804
     #[serde(rename = "SCRAM-SHA-1")]
     ScramSha1,
+    /// RFC 7804
     #[serde(rename = "SCRAM-SHA-256")]
     ScramSha256,
+    /// RFC 8292
     #[serde(rename = "vapid")]
     Vapid,
 }
 
 impl AuthenticationScheme {
+    /// The registered name, e.g. `Bearer`.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Basic => "Basic",
@@ -317,12 +348,16 @@ impl fmt::Display for AuthenticationScheme {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum In {
+    /// A query parameter.
     Query,
+    /// A header.
     Header,
+    /// A cookie.
     Cookie,
 }
 
 impl In {
+    /// The OpenAPI name, e.g. `header`.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Query => "query",
@@ -339,6 +374,8 @@ impl fmt::Display for In {
 }
 
 pub mod oauth2_flows {
+    //! Configuration of the OAuth 2.0 flows, used for the docs.
+
     use serde_json::{
         Map,
         Value,
@@ -359,32 +396,49 @@ pub mod oauth2_flows {
         pub authorization_code: Option<AuthorizationCode>,
     }
 
+    /// Configuration for the OAuth Implicit flow.
     #[derive(Debug, Clone)]
     pub struct Implicit {
+        /// The authorization URL.
         pub authorization_url: Url,
+        /// The URL for obtaining refresh tokens.
         pub refresh_url: Option<Url>,
+        /// The available scopes, as name and description.
         pub scopes: Vec<(String, String)>,
     }
 
+    /// Configuration for the OAuth Resource Owner Password flow.
     #[derive(Debug, Clone)]
     pub struct Password {
+        /// The token URL.
         pub token_url: Url,
+        /// The URL for obtaining refresh tokens.
         pub refresh_url: Option<Url>,
+        /// The available scopes, as name and description.
         pub scopes: Vec<(String, String)>,
     }
 
+    /// Configuration for the OAuth Client Credentials flow.
     #[derive(Debug, Clone)]
     pub struct ClientCredentials {
+        /// The token URL.
         pub token_url: Url,
+        /// The URL for obtaining refresh tokens.
         pub refresh_url: Option<Url>,
+        /// The available scopes, as name and description.
         pub scopes: Vec<(String, String)>,
     }
 
+    /// Configuration for the OAuth Authorization Code flow.
     #[derive(Debug, Clone)]
     pub struct AuthorizationCode {
+        /// The authorization URL.
         pub authorization_url: Url,
+        /// The token URL.
         pub token_url: Url,
+        /// The URL for obtaining refresh tokens.
         pub refresh_url: Option<Url>,
+        /// The available scopes, as name and description.
         pub scopes: Vec<(String, String)>,
     }
 

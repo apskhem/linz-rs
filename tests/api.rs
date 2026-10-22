@@ -857,6 +857,34 @@ fn applies_security_without_scopes() {
     assert_eq!(spec["paths"]["/x"]["get"]["security"], json!([{ "bearerAuth": [] }]));
 }
 
+#[test]
+fn documents_all_securities_as_one_requirement() {
+    let api_key = Security::new(
+        "apiKey",
+        SecurityType::ApiKey {
+            name: "X-Api-Key".into(),
+            r#in: linz_rs::security::In::Header,
+        },
+        |_: Credentials| async move { Ok(Extensions::new()) },
+    );
+    let endpoints: LinzEndpointGroup = vec![(
+        "get:/x".into(),
+        Endpoint::new("x")
+            .security(bearer().apply(["read"]))
+            .security(&api_key)
+            .security(bearer().apply(["write", "read"]))
+            .returns(200, TextBody::new())
+            .handler(|_, _| async move { Ok(String::new()) }),
+    )];
+    let spec = build_json(&BuilderConfig::new("t", "1"), &endpoints).unwrap();
+
+    // all of them are required at runtime: one requirement object (AND), not one per scheme (OR)
+    assert_eq!(
+        spec["paths"]["/x"]["get"]["security"],
+        json!([{ "bearerAuth": ["read", "write"], "apiKey": [] }])
+    );
+}
+
 #[tokio::test]
 async fn limits_body_size() {
     let config = |max_body_size| {

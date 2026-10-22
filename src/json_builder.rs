@@ -1,3 +1,5 @@
+//! The OpenAPI 3.1 document builder: [`build_json`] and [`BuilderConfig`].
+
 use std::collections::BTreeMap;
 
 use http::StatusCode;
@@ -28,6 +30,7 @@ use crate::internal::{
 
 const JSON_API_ERROR_COMPONENT_NAME: &str = "JsonApiError";
 
+/// The JSON schema dialects of OpenAPI 3.1. The first one is the default `jsonSchemaDialect`.
 pub const JSON_SCHEMA_DIALECTS: [&str; 2] = [
     "https://spec.openapis.org/oas/3.1/dialect/base",
     "https://spec.openapis.org/oas/3.1/dialect/2024-11-10",
@@ -260,13 +263,22 @@ pub fn build_json<S>(config: &BuilderConfig, endpoints: &[(String, LinzEndpoint<
             operation.insert("parameters".into(), parameters.into());
         }
         if !meta.security.is_empty() {
-            operation.insert(
-                "security".into(),
-                meta.security
-                    .iter()
-                    .map(|applied| json!({ applied.security.name.clone(): applied.scopes }))
-                    .collect(),
-            );
+            // every applied security is required, so they form a single requirement object
+            // (separate objects would mean that any one of them is enough)
+            let mut requirement = Map::new();
+            for applied in &meta.security {
+                let scopes = requirement
+                    .entry(applied.security.name.clone())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Value::Array(scopes) = scopes {
+                    for scope in &applied.scopes {
+                        if !scopes.iter().any(|s| s == scope) {
+                            scopes.push(scope.clone().into());
+                        }
+                    }
+                }
+            }
+            operation.insert("security".into(), json!([requirement]));
         }
         if let Some(body) = &meta.request_body {
             let mut request_body = Map::new();

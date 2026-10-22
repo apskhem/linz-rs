@@ -1,3 +1,5 @@
+//! Registers endpoints on an axum router: [`create_api`] and its configuration.
+
 use std::collections::{
     BTreeMap,
     HashSet,
@@ -79,10 +81,12 @@ pub trait Logger: Send + Sync {
 /// CORS configurations.
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
+#[non_exhaustive]
 pub enum CorsConfig {
     /// Allows any origin with the methods `GET`, `HEAD`, `PUT`, `PATCH`, `POST` and `DELETE`
     /// and mirrors the requested headers.
     Permissive,
+    /// Uses the given `tower_http` CORS layer.
     Custom(CorsLayer),
 }
 
@@ -109,11 +113,17 @@ impl CorsConfig {
 
 /// The documents viewer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DocsViewer {
+    /// [Scalar](https://github.com/scalar/scalar).
     Scalar,
+    /// [Swagger UI](https://github.com/swagger-api/swagger-ui).
     Swagger,
+    /// [Redoc](https://github.com/Redocly/redoc).
     Redoc,
+    /// [RapiDoc](https://github.com/rapi-doc/RapiDoc).
     Rapidoc,
+    /// [Stoplight Elements](https://github.com/stoplightio/elements).
     SpotlightElements,
 }
 
@@ -151,13 +161,16 @@ pub type FallbackHandler = Arc<dyn Fn(axum::extract::Request) -> BoxFuture<Optio
 /// The default of [`CreateApiConfig::max_body_size`]: 2 MiB, like axum's `DefaultBodyLimit`.
 pub const DEFAULT_MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
 
+/// Configurations of [`create_api`].
 #[derive(Clone)]
 pub struct CreateApiConfig {
     /// CORS configurations.
     pub cors: Option<CorsConfig>,
     /// Configurations related to OpenAPI documents.
     pub docs: Option<DocsConfig>,
+    /// Receives the registration and error messages.
     pub logger: Option<Arc<dyn Logger>>,
+    /// Called for requests that match no route, before the JSON `404` response.
     pub fallback_handler: Option<FallbackHandler>,
     /// The maximum size of request bodies in bytes; larger bodies respond `413`.
     /// Defaults to [`DEFAULT_MAX_BODY_SIZE`]. `None` removes the limit.

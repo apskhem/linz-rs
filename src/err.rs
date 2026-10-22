@@ -1,3 +1,5 @@
+//! Errors: [`ApiError`] for responses, [`LinzError`] for registration, and validation details.
+
 use core::fmt;
 
 use http::{
@@ -83,16 +85,21 @@ pub struct JsonApiErrorResponse {
 /// It is rendered as a JSON:API error response with the given status.
 #[derive(Debug, Clone)]
 pub struct ApiError {
+    /// The status of the response.
     pub status: StatusCode,
+    /// The JSON:API error objects of the response.
     pub errors: Vec<JsonApiErrorItem>,
+    /// Extra headers of the response.
     pub headers: HeaderMap,
 }
 
 impl ApiError {
+    /// Creates an error with a single error object.
     pub fn new(status: StatusCode, error: JsonApiErrorItem) -> Self {
         Self::many(status, vec![error])
     }
 
+    /// Creates an error with several error objects.
     pub fn many(status: StatusCode, errors: Vec<JsonApiErrorItem>) -> Self {
         Self {
             status,
@@ -106,6 +113,7 @@ impl ApiError {
         Self::new(status, JsonApiErrorItem::detail(detail))
     }
 
+    /// Sets extra headers of the response.
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
         self.headers = headers;
         self
@@ -120,9 +128,12 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+/// A violation of a JSON schema by a request part.
 #[derive(Debug, Clone, Serialize)]
 pub struct ValidationFieldError {
+    /// The path to the invalid value, e.g. `["items", "0", "name"]`.
     pub path: Vec<String>,
+    /// A human-readable description of the violation.
     pub message: String,
 }
 
@@ -162,13 +173,22 @@ impl BodyParserError {
     }
 }
 
+/// A failure to extract the credentials of a [`crate::security::SecurityType`] from a request.
+/// It responds `401` with its message as `detail`.
 #[derive(Debug, PartialEq, Eq, Clone, Hash)]
+#[non_exhaustive]
 pub enum SecurityError {
+    /// The `Authorization` header is missing.
     MissingAuthorizationHeader,
+    /// The `Authorization` header is not valid UTF-8 or has no scheme.
     InvalidAuthorizationHeaderValue,
+    /// The `Authorization` header has a scheme but no credentials.
     MissingTokenFromScheme,
+    /// The `Authorization` header uses another scheme.
     InvalidScheme,
+    /// The header, query parameter or cookie of an API key is missing.
     MissingApiKeyParameter,
+    /// The header of an API key is not valid UTF-8.
     InvalidUtf8HeaderValue,
 }
 
@@ -195,34 +215,69 @@ impl From<SecurityError> for ApiError {
 
 /// An error raised while registering endpoints or building the OpenAPI document.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LinzError {
     /// The key is not a `method:path` string.
-    InvalidKey { key: String },
+    InvalidKey {
+        /// The invalid key.
+        key: String,
+    },
     /// The method is not one of `get`, `post`, `put`, `patch` or `delete`.
-    InvalidMethod { method: String, path: String },
+    InvalidMethod {
+        /// The invalid method.
+        method: String,
+        /// The path of the key.
+        path: String,
+    },
     /// The path does not start with `/`, or contains `?` or `#`.
-    InvalidPath { path: String },
+    InvalidPath {
+        /// The invalid path.
+        path: String,
+    },
     /// Two endpoints share an operation ID.
-    DuplicateOperationId { operation_id: String, path: String },
+    DuplicateOperationId {
+        /// The duplicated operation ID.
+        operation_id: String,
+        /// The path of the second endpoint.
+        path: String,
+    },
     /// Two routes share a method and path.
-    DuplicateRoute { method: String, path: String },
+    DuplicateRoute {
+        /// The method of the route.
+        method: String,
+        /// The path of the route.
+        path: String,
+    },
     /// Merging groups produced duplicated keys.
-    DuplicateKeys { keys: Vec<String> },
+    DuplicateKeys {
+        /// The duplicated `method:path` keys.
+        keys: Vec<String>,
+    },
     /// The path has a parameter that the path DTO does not declare.
     UndeclaredPathParameter {
+        /// The operation ID of the endpoint.
         operation_id: String,
+        /// The path of the endpoint.
         path: String,
+        /// The undeclared parameter.
         parameter: String,
+        /// The fields the path DTO declares.
         declared: Vec<String>,
     },
     /// The path DTO requires a field that the path does not provide.
     MissingPathParameter {
+        /// The operation ID of the endpoint.
         operation_id: String,
+        /// The path of the endpoint.
         path: String,
+        /// The required field that is missing from the path.
         field: String,
     },
     /// The OpenAPI document could not be built.
-    Spec { message: String },
+    Spec {
+        /// The underlying error.
+        message: String,
+    },
 }
 
 impl fmt::Display for LinzError {
