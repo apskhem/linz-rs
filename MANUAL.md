@@ -76,6 +76,7 @@ http = "1"
   features your server needs (for example `tokio` and `http1` for `axum::serve`) in your own
   `Cargo.toml`, and Cargo's feature unification turns them on.
 - **Crate name**: the library crate is named `linz_rs`.
+- **Toolchain**: linz-rs uses the Rust 2024 edition and requires Rust 1.88 or newer.
 
 ---
 
@@ -871,6 +872,7 @@ spec.servers = vec![oas::Server {
     url: "https://api.example.com".into(),
     description: Some("Production".into()),
     variables: Default::default(),
+    extensions: Default::default(),
 }];
 spec.external_docs = None;
 spec.webhooks = None;            // raw JSON (serde_json::Value)

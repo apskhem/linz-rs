@@ -131,7 +131,7 @@ impl From<jsonschema::ValidationError<'_>> for ValidationFieldError {
         let message = value.to_string();
 
         Self {
-            path: value.instance_path.into_iter().map(|seg| seg.to_string()).collect(),
+            path: value.instance_path().iter().map(|seg| seg.to_string()).collect(),
             message,
         }
     }

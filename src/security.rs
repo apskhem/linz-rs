@@ -3,19 +3,19 @@ use std::future::Future;
 use std::sync::Arc;
 
 use http::{
-    header,
     Extensions,
     HeaderMap,
     Method,
     Uri,
+    header,
 };
 use serde::{
     Deserialize,
     Serialize,
 };
 use serde_json::{
-    json,
     Value,
+    json,
 };
 use url::Url;
 
@@ -340,9 +340,9 @@ impl fmt::Display for In {
 
 pub mod oauth2_flows {
     use serde_json::{
-        json,
         Map,
         Value,
+        json,
     };
     use url::Url;
 

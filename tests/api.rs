@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::response::Response;
-use axum::Router;
 use http::{
-    header,
     Extensions,
     Request,
     StatusCode,
+    header,
 };
 use http_body_util::BodyExt;
 use linz_rs::security::AuthenticationScheme;
@@ -18,8 +18,8 @@ use serde::{
     Serialize,
 };
 use serde_json::{
-    json,
     Value,
+    json,
 };
 use tower::ServiceExt;
 
@@ -484,7 +484,9 @@ async fn accepts_multipart_uploads() {
     assert_eq!(body, json!({ "field": "value", "filename": "a.png", "size": 3 }));
 
     // a text field is not a file
-    let body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\nx\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nv\r\n--{boundary}--\r\n");
+    let body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\nx\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"field\"\r\n\r\nv\r\n--{boundary}--\r\n"
+    );
     let req = Request::post("/echo/simple/upload")
         .header(
             header::CONTENT_TYPE,

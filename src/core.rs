@@ -22,10 +22,10 @@ use http::{
 };
 use oas3::spec;
 use schemars::{
-    json_schema,
     JsonSchema,
     Schema,
     SchemaGenerator,
+    json_schema,
 };
 use serde::de::DeserializeOwned;
 use serde::{

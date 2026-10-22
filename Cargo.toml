@@ -1,25 +1,26 @@
 [package]
 name = "linz-rs"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = [] }
-bytes = "1.10"
-http = "1.3"
-http-body-util = "0.1"
-jsonschema = { version = "0.30", default-features = false, features = ["resolve-file"] }
-mime = "0.3"
-oas3 = "0.16"
-percent-encoding = "2.3"
-regex = "1.11.1"
-schemars = "1"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["preserve_order"] }
-tower-http = { version = "0.6", features = ["cors"] }
-url = "2.5"
+axum = { version = "0.8.9", default-features = false, features = [] }
+bytes = "1.12.1"
+http = "1.5.0"
+http-body-util = "0.1.5"
+jsonschema = { version = "0.60.0", default-features = false, features = ["resolve-file"] }
+mime = "0.3.17"
+oas3 = "0.22.0"
+percent-encoding = "2.3.2"
+regex = "1.13.1"
+schemars = "1.2.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tower-http = { version = "0.7.1", features = ["cors"] }
+url = "2.5.8"
 
 [dev-dependencies]
-axum = { version = "0.8", features = ["tokio", "http1"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
-tower = { version = "0.5", features = ["util"] }
+axum = { version = "0.8.9", features = ["tokio", "http1"] }
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net"] }
+tower = { version = "0.5.3", features = ["util"] }

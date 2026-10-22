@@ -16,14 +16,14 @@ pub mod security;
 pub use oas3::spec as oas;
 
 pub use crate::adapter::{
-    create_api,
     CorsConfig,
     CreateApiConfig,
+    DEFAULT_MAX_BODY_SIZE,
     DocsConfig,
     DocsViewer,
     FallbackHandler,
     Logger,
-    DEFAULT_MAX_BODY_SIZE,
+    create_api,
 };
 pub use crate::api::Api;
 pub use crate::core::{
@@ -43,6 +43,7 @@ pub use crate::core::{
     JsonBody,
     LinzEndpoint,
     LinzEndpointGroup,
+    METHODS,
     NoResponse,
     OctetStreamBody,
     Request,
@@ -53,7 +54,6 @@ pub use crate::core::{
     TextBody,
     TypeSchema,
     UrlEncodedBody,
-    METHODS,
 };
 pub use crate::err::{
     ApiError,
@@ -62,13 +62,13 @@ pub use crate::err::{
     LinzError,
 };
 pub use crate::grouping::{
+    GroupConfig,
     apply_group_config,
     merge_endpoint_groups,
-    GroupConfig,
 };
 pub use crate::json_builder::{
-    build_json,
     BuilderConfig,
+    build_json,
 };
 pub use crate::security::{
     AppliedSecurity,

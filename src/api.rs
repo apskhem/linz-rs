@@ -14,8 +14,8 @@ use crate::core::{
 };
 use crate::err::ApiError;
 use crate::grouping::{
-    apply_group_config,
     GroupConfig,
+    apply_group_config,
 };
 use crate::internal::utils;
 

@@ -3,11 +3,11 @@ use std::hash::{
     BuildHasher,
     Hasher,
 };
+use std::sync::OnceLock;
 use std::sync::atomic::{
     AtomicU64,
     Ordering,
 };
-use std::sync::OnceLock;
 
 use http::{
     HeaderMap,

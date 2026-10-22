@@ -4,6 +4,7 @@ use std::collections::{
 };
 use std::sync::Arc;
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{
     FromRequestParts,
@@ -15,14 +16,13 @@ use axum::routing::{
     MethodFilter,
     MethodRouter,
 };
-use axum::Router;
 use http::{
-    header,
     Extensions,
     HeaderMap,
     HeaderValue,
     Method,
     StatusCode,
+    header,
 };
 use http_body_util::{
     BodyExt,
@@ -52,8 +52,8 @@ use crate::internal::{
     utils,
 };
 use crate::json_builder::{
-    build_json,
     BuilderConfig,
+    build_json,
 };
 
 /// A logger with the levels of RFC 5424. Every method is a no-op by default.
@@ -322,10 +322,10 @@ where
             let method = req.method().clone();
             let path = req.uri().path().to_string();
 
-            if let Some(fallback_handler) = fallback_handler {
-                if let Some(response) = fallback_handler(req).await {
-                    return response;
-                }
+            if let Some(fallback_handler) = fallback_handler
+                && let Some(response) = fallback_handler(req).await
+            {
+                return response;
             }
 
             not_found(&method, &path)
@@ -349,15 +349,15 @@ fn check_path_parameters<S>(endpoint: &LinzEndpoint<S>, path: &str) -> Result<()
     };
     let parameters = utils::path_param_names(path);
 
-    if !shape.open {
-        if let Some(parameter) = parameters.iter().find(|p| !shape.properties.contains(p)) {
-            return Err(LinzError::UndeclaredPathParameter {
-                operation_id: endpoint.operation_id().to_string(),
-                path: path.to_string(),
-                parameter: parameter.clone(),
-                declared: shape.properties,
-            });
-        }
+    if !shape.open
+        && let Some(parameter) = parameters.iter().find(|p| !shape.properties.contains(p))
+    {
+        return Err(LinzError::UndeclaredPathParameter {
+            operation_id: endpoint.operation_id().to_string(),
+            path: path.to_string(),
+            parameter: parameter.clone(),
+            declared: shape.properties,
+        });
     }
 
     if let Some(field) = shape.required.iter().find(|f| !parameters.contains(f)) {

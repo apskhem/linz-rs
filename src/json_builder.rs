@@ -4,9 +4,9 @@ use http::StatusCode;
 use oas3::spec;
 use schemars::SchemaGenerator;
 use serde_json::{
-    json,
     Map,
     Value,
+    json,
 };
 
 use crate::core::{
@@ -150,13 +150,13 @@ pub fn build_json<S>(config: &BuilderConfig, endpoints: &[(String, LinzEndpoint<
 
         // collect body objects
         let request_body_schema_name = format!("{operation_name}RequestBody");
-        if let Some(body) = &meta.request_body {
-            if has_schema(body) {
-                schemas.insert(
-                    request_body_schema_name.clone(),
-                    schema_value((body.schema.docs)(&mut generator)),
-                );
-            }
+        if let Some(body) = &meta.request_body
+            && has_schema(body)
+        {
+            schemas.insert(
+                request_body_schema_name.clone(),
+                schema_value((body.schema.docs)(&mut generator)),
+            );
         }
 
         // collect response objects

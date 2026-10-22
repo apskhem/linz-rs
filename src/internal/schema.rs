@@ -5,8 +5,8 @@ use std::sync::{
     RwLock,
 };
 
-use schemars::generate::SchemaSettings;
 use schemars::JsonSchema;
+use schemars::generate::SchemaSettings;
 use serde_json::Value;
 
 /// A JSON schema of a Rust type compiled for validation.
