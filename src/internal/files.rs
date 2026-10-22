@@ -1,12 +1,12 @@
 //! Binary payloads (multipart files and `application/octet-stream` bodies) cannot be
 //! represented in a [`serde_json::Value`], which is the intermediate format used for
 //! validation. Instead, files are kept in a [`FileStore`] and referenced from the JSON value
-//! by a placeholder string. [`crate::core::File`] (de)serializes through the store that is
+//! by a placeholder string. [`crate::endpoint::File`] (de)serializes through the store that is
 //! active on the current thread.
 
 use std::cell::RefCell;
 
-use crate::core::File;
+use crate::endpoint::File;
 use crate::internal::utils;
 
 const PLACEHOLDER_PREFIX: &str = "\u{0}linz-file:";

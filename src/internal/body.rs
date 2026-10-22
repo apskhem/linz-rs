@@ -5,7 +5,7 @@ use serde_json::{
     Value,
 };
 
-use crate::core::{
+use crate::endpoint::{
     BodyKind,
     File,
 };

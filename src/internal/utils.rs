@@ -19,7 +19,7 @@ use serde_json::{
     Value,
 };
 
-use crate::core::HttpMethod;
+use crate::endpoint::HttpMethod;
 use crate::err::LinzError;
 
 /// Converts request headers into a JSON object. Header names are lower-cased and

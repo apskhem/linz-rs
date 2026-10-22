@@ -15,6 +15,9 @@ minor releases (0.x.0) may contain breaking changes.
 
 ### Changed
 
+- The `core` module is renamed `endpoint`, so it no longer shadows Rust's built-in `core`
+  crate. Items re-exported from the crate root (`use linz_rs::*;`) are unaffected; replace
+  `linz_rs::core::` paths with `linz_rs::endpoint::`.
 - `examples/bootstrap` is now a starter project for new services: a task tracker with
   bearer-token auth, validation, pagination, file attachments, shared state, domain errors
   and end-to-end tests, split into modules.

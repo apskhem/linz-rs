@@ -72,7 +72,7 @@
 
 pub mod adapter;
 pub mod api;
-pub mod core;
+pub mod endpoint;
 pub mod err;
 pub mod grouping;
 pub(crate) mod internal;
@@ -91,7 +91,7 @@ pub use crate::adapter::{
     create_api,
 };
 pub use crate::api::Api;
-pub use crate::core::{
+pub use crate::endpoint::{
     BodyKind,
     Context,
     DataTransferObject,

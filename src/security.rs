@@ -1,6 +1,6 @@
 //! Security schemes: [`Security`], [`AppliedSecurity`] and the token extraction per [`SecurityType`].
 
-use core::fmt;
+use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ use serde_json::{
 };
 use url::Url;
 
-use crate::core::BoxFuture;
+use crate::endpoint::BoxFuture;
 use crate::err::*;
 use crate::internal::utils;
 
@@ -45,7 +45,7 @@ pub struct Credentials {
 }
 
 /// A handler for implementing and performing authentication. On success, it returns
-/// objects to attach to [`crate::core::Context::extensions`].
+/// objects to attach to [`crate::endpoint::Context::extensions`].
 pub type SecurityHandler = Arc<dyn Fn(Credentials) -> BoxFuture<Result<Extensions, ApiError>> + Send + Sync>;
 
 /// Represents a security scheme that can be used by the operations.

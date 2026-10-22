@@ -11,7 +11,7 @@ use serde_json::{
     json,
 };
 
-use crate::core::{
+use crate::endpoint::{
     BodyDescriptor,
     BodyKind,
     EncodingItem,

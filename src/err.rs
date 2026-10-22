@@ -1,6 +1,6 @@
 //! Errors: [`ApiError`] for responses, [`LinzError`] for registration, and validation details.
 
-use core::fmt;
+use std::fmt;
 
 use http::{
     HeaderMap,

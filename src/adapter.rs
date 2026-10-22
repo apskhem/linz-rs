@@ -34,7 +34,7 @@ use tower_http::cors::{
     CorsLayer,
 };
 
-use crate::core::*;
+use crate::endpoint::*;
 use crate::err::{
     ApiError,
     BodyParserError,

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use oas3::spec;
 
-use crate::core::{
+use crate::endpoint::{
     IntoTag,
     LinzEndpointGroup,
 };

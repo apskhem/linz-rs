@@ -3,7 +3,7 @@
 use std::fmt;
 use std::future::Future;
 
-use crate::core::{
+use crate::endpoint::{
     Context,
     DataTransferObject,
     Endpoint,
