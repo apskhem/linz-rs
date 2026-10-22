@@ -90,7 +90,7 @@ struct Session {
 
 #[derive(Deserialize, JsonSchema)]
 struct ClientHeader {
-    #[serde(rename = "x-client")]
+    #[serde(rename = "X-Client")]
     client: String,
 }
 
@@ -230,7 +230,7 @@ fn endpoints() -> LinzEndpointGroup {
                 .returns(200, JsonBody::new::<Value>())
                 .handler(|req, ctx| {
                     async move {
-                        let user = ctx.extensions.get::<UserId>().unwrap().0.clone();
+                        let user = ctx.extension::<UserId>()?.0.clone();
                         Ok(json!({
                             "user": user,
                             "session": req.cookies.session,
@@ -714,7 +714,7 @@ fn builds_openapi_document() {
     assert_eq!(me["security"], json!([{ "bearerAuth": ["read"] }]));
     assert!(me["responses"]["401"].is_object());
     assert_eq!(me["parameters"][0]["in"], "header");
-    assert_eq!(me["parameters"][0]["name"], "x-client");
+    assert_eq!(me["parameters"][0]["name"], "X-Client");
     assert_eq!(me["parameters"][1]["in"], "cookie");
     assert_eq!(
         spec["components"]["securitySchemes"]["bearerAuth"],
@@ -747,15 +747,7 @@ fn builds_openapi_document() {
 fn groups_endpoints() {
     let group = apply_group_config(
         endpoints().into_iter().take(2).collect(),
-        GroupConfig {
-            tags: vec![oas::Tag {
-                name: "Simple".into(),
-                description: None,
-                extensions: Default::default(),
-            }],
-            deprecated: Some(true),
-            ..Default::default()
-        },
+        GroupConfig::new().tag("Simple").deprecated(true),
     );
     let merged = merge_endpoint_groups("/v1/", vec![group]).unwrap();
 
@@ -777,20 +769,171 @@ fn groups_endpoints() {
         ],
     )
     .unwrap_err();
-    assert_eq!(err, "Duplicated keys occured: post:/v1/echo/:path");
+    assert_eq!(
+        err,
+        LinzError::DuplicateKeys {
+            keys: vec!["post:/v1/echo/:path".into()]
+        }
+    );
+    assert_eq!(err.to_string(), "Duplicated keys occured: post:/v1/echo/:path");
 }
 
 #[test]
 fn rejects_invalid_registrations() {
-    let duplicated: LinzEndpointGroup = vec![endpoints().remove(0), ("get:/other".into(), endpoints().remove(0).1)];
+    let duplicated: LinzEndpointGroup = vec![
+        endpoints().remove(0),
+        ("get:/other/:path".into(), endpoints().remove(0).1),
+    ];
+    let err = create_api(Router::<()>::new(), duplicated, Default::default()).unwrap_err();
+    assert!(matches!(err, LinzError::DuplicateOperationId { .. }));
     assert_eq!(
-        create_api(Router::<()>::new(), duplicated, Default::default()).unwrap_err(),
-        "Duplicate operation ID \"echoPathSimple\" for path /other"
+        err.to_string(),
+        "Duplicate operation ID \"echoPathSimple\" for path /other/:path"
     );
 
     let invalid: LinzEndpointGroup = vec![("head:/x".into(), endpoints().remove(0).1)];
     assert_eq!(
-        create_api(Router::<()>::new(), invalid, Default::default()).unwrap_err(),
+        create_api(Router::<()>::new(), invalid, Default::default())
+            .unwrap_err()
+            .to_string(),
         "Invalid method \"head\" for path /x"
     );
+
+    let route = |key: &str| -> LinzEndpointGroup { vec![(key.into(), endpoints().remove(0).1)] };
+    let check = |key: &str| create_api(Router::<()>::new(), route(key), Default::default()).map(|_| ());
+
+    // the path DTO `EchoPath` has the field `path`
+    assert!(check("post:/a/:path").is_ok());
+    assert!(check("post:/a/{path}").is_ok());
+    assert_eq!(
+        check("post:/a/:id").unwrap_err(),
+        LinzError::UndeclaredPathParameter {
+            operation_id: "echoPathSimple".into(),
+            path: "/a/:id".into(),
+            parameter: "id".into(),
+            declared: vec!["path".into()],
+        }
+    );
+    assert_eq!(
+        check("post:/a/:path/:extra").unwrap_err().to_string(),
+        "Path parameter \"extra\" of /a/:path/:extra (echoPathSimple) is not declared in its path type (declared: path)"
+    );
+    assert_eq!(
+        check("post:/a").unwrap_err().to_string(),
+        "The path type of /a (echoPathSimple) requires \"path\", which is not a parameter of the path"
+    );
+}
+
+#[tokio::test]
+async fn reports_missing_extensions() {
+    let endpoints: LinzEndpointGroup = vec![(
+        "get:/whoami".into(),
+        Endpoint::new("whoami")
+            .returns(200, TextBody::new())
+            .handler(|_, ctx| async move { Ok(ctx.extension::<UserId>()?.0.clone()) }),
+    )];
+    let app = create_api(Router::new(), endpoints, Default::default()).unwrap();
+    let (status, body) = send_json(app, Request::get("/whoami").body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        body,
+        json!({ "errors": [{ "detail": "Missing request extension `api::UserId`" }] })
+    );
+}
+
+#[test]
+fn applies_security_without_scopes() {
+    let scheme = bearer();
+    let endpoints: LinzEndpointGroup = vec![(
+        "get:/x".into(),
+        Endpoint::new("x")
+            .security(&scheme)
+            .returns(200, TextBody::new())
+            .handler(|_, _| async move { Ok(String::new()) }),
+    )];
+    let spec = build_json(&BuilderConfig::new("t", "1"), &endpoints).unwrap();
+    assert_eq!(spec["paths"]["/x"]["get"]["security"], json!([{ "bearerAuth": [] }]));
+}
+
+#[tokio::test]
+async fn limits_body_size() {
+    let config = |max_body_size| {
+        CreateApiConfig {
+            max_body_size,
+            ..Default::default()
+        }
+    };
+    let big = json!({ "echo": "x".repeat(64) });
+
+    let app = create_api(Router::new(), endpoints(), config(Some(32))).unwrap();
+    let (status, body) = send_json(app, post_json("/echo/simple/body", big.clone())).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        body,
+        json!({ "errors": [{ "detail": "Request body exceeds the limit of 32 bytes" }] })
+    );
+
+    let app = create_api(Router::new(), endpoints(), config(None)).unwrap();
+    let (status, _) = send_json(app, post_json("/echo/simple/body", big)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    assert_eq!(CreateApiConfig::default().max_body_size, Some(DEFAULT_MAX_BODY_SIZE));
+}
+
+fn api_users() -> Api<AppState> {
+    Api::<AppState>::new()
+        .get(
+            "/greet/:path",
+            Endpoint::new("greet")
+                .path::<EchoPath>()
+                .returns(200, JsonBody::new::<Greeting>()),
+            |req, ctx| {
+                async move {
+                    Ok(Greeting {
+                        message: format!("{}, {}", ctx.state.greeting, req.params.path),
+                    })
+                }
+            },
+        )
+        .delete(
+            "/greet",
+            Endpoint::new("ungreet").returns(204, JsonBody::new::<()>()),
+            |_, _| async move { Ok(()) },
+        )
+        .config(GroupConfig::new().tag("Greetings"))
+}
+
+#[tokio::test]
+async fn builds_routes_with_api() {
+    let api = Api::<AppState>::new().nest("/v1", api_users()).merge(Api::new().get(
+        "/health",
+        Endpoint::new("health").returns(200, TextBody::new()),
+        |_, _| async move { Ok("ok".to_string()) },
+    ));
+
+    let keys: Vec<&str> = api.endpoints().iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["get:/v1/greet/:path", "delete:/v1/greet", "get:/health"]);
+
+    let spec = build_json(&BuilderConfig::new("t", "1"), api.endpoints()).unwrap();
+    assert_eq!(spec["paths"]["/v1/greet/{path}"]["get"]["tags"], json!(["Greetings"]));
+    assert!(spec["paths"]["/health"]["get"]["tags"].is_null());
+
+    let app = create_api(Router::new(), api, Default::default())
+        .unwrap()
+        .with_state(AppState {
+            greeting: "hello".into(),
+        });
+
+    let (status, body) = send_json(
+        app.clone(),
+        Request::get("/v1/greet/world").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!((status, body), (StatusCode::OK, json!({ "message": "hello, world" })));
+
+    let (status, _, body) = send(app.clone(), Request::delete("/v1/greet").body(Body::empty()).unwrap()).await;
+    assert_eq!((status, body), (StatusCode::NO_CONTENT, vec![]));
+
+    let (status, _, body) = send(app, Request::get("/health").body(Body::empty()).unwrap()).await;
+    assert_eq!((status, body), (StatusCode::OK, b"ok".to_vec()));
 }

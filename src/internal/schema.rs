@@ -136,6 +136,52 @@ fn coerce_with(value: &mut Value, schema: &Value, root: &Value, depth: usize) {
     }
 }
 
+/// The fields of an object schema.
+pub(crate) struct ObjectShape {
+    pub properties: Vec<String>,
+    pub required: Vec<String>,
+    /// Whether `additionalProperties` explicitly allows other fields (e.g. a map type).
+    pub open: bool,
+}
+
+/// Describes the fields of an object schema, following `$ref` and `allOf`/`anyOf`/`oneOf`.
+/// Returns `None` for schemas that do not describe an object.
+pub(crate) fn object_shape(root: &Value) -> Option<ObjectShape> {
+    let schemas = flatten(root, root, 0);
+    let is_object = schemas.iter().any(|s| {
+        s.get("properties").is_some()
+            || s.get("additionalProperties").is_some()
+            || s.get("type").and_then(Value::as_str) == Some("object")
+    });
+    if !is_object {
+        return None;
+    }
+
+    let mut shape = ObjectShape {
+        properties: Vec::new(),
+        required: Vec::new(),
+        open: false,
+    };
+    for schema in schemas {
+        if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+            shape.properties.extend(properties.keys().cloned());
+        }
+        if let Some(required) = schema.get("required").and_then(Value::as_array) {
+            shape
+                .required
+                .extend(required.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+        if matches!(
+            schema.get("additionalProperties"),
+            Some(Value::Bool(true)) | Some(Value::Object(_))
+        ) {
+            shape.open = true;
+        }
+    }
+
+    Some(shape)
+}
+
 /// Resolves `$ref` and collects the schema together with every `allOf`/`anyOf`/`oneOf` member.
 fn flatten<'a>(schema: &'a Value, root: &'a Value, depth: usize) -> Vec<&'a Value> {
     if depth > MAX_DEPTH {

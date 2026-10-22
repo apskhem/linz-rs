@@ -190,6 +190,20 @@ impl AppliedSecurity {
     }
 }
 
+impl From<&Security> for AppliedSecurity {
+    /// Applies the security without scopes.
+    fn from(security: &Security) -> Self {
+        security.apply(Vec::<String>::new())
+    }
+}
+
+impl From<Security> for AppliedSecurity {
+    /// Applies the security without scopes.
+    fn from(security: Security) -> Self {
+        (&security).into()
+    }
+}
+
 fn extract_auth_header(headers: &HeaderMap, required_scheme: &str) -> Result<String, SecurityError> {
     let auth = headers
         .get(header::AUTHORIZATION)

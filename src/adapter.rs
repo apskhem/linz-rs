@@ -24,7 +24,11 @@ use http::{
     Method,
     StatusCode,
 };
-use http_body_util::BodyExt;
+use http_body_util::{
+    BodyExt,
+    LengthLimitError,
+    Limited,
+};
 use serde_json::Value;
 use tower_http::cors::{
     AllowHeaders,
@@ -38,11 +42,13 @@ use crate::err::{
     BodyParserError,
     JsonApiErrorItem,
     JsonApiErrorResponse,
+    LinzError,
     ValidationIssue,
 };
 use crate::internal::files::FileStore;
 use crate::internal::{
     body,
+    schema,
     utils,
 };
 use crate::json_builder::{
@@ -142,7 +148,10 @@ pub struct DocsConfig {
 /// A handler for requests that match no route. Returning `None` responds with `404 Not Found`.
 pub type FallbackHandler = Arc<dyn Fn(axum::extract::Request) -> BoxFuture<Option<Response>> + Send + Sync>;
 
-#[derive(Clone, Default)]
+/// The default of [`CreateApiConfig::max_body_size`]: 2 MiB, like axum's `DefaultBodyLimit`.
+pub const DEFAULT_MAX_BODY_SIZE: usize = 2 * 1024 * 1024;
+
+#[derive(Clone)]
 pub struct CreateApiConfig {
     /// CORS configurations.
     pub cors: Option<CorsConfig>,
@@ -150,10 +159,26 @@ pub struct CreateApiConfig {
     pub docs: Option<DocsConfig>,
     pub logger: Option<Arc<dyn Logger>>,
     pub fallback_handler: Option<FallbackHandler>,
+    /// The maximum size of request bodies in bytes; larger bodies respond `413`.
+    /// Defaults to [`DEFAULT_MAX_BODY_SIZE`]. `None` removes the limit.
+    pub max_body_size: Option<usize>,
+}
+
+impl Default for CreateApiConfig {
+    fn default() -> Self {
+        Self {
+            cors: None,
+            docs: None,
+            logger: None,
+            fallback_handler: None,
+            max_body_size: Some(DEFAULT_MAX_BODY_SIZE),
+        }
+    }
 }
 
 struct Shared {
     logger: Option<Arc<dyn Logger>>,
+    max_body_size: Option<usize>,
 }
 
 impl Shared {
@@ -179,12 +204,13 @@ impl Shared {
 /// `S` is the state of the router, available to handlers as [`Context::state`].
 pub fn create_api<S>(
     app: Router<S>,
-    endpoints: LinzEndpointGroup<S>,
+    endpoints: impl Into<LinzEndpointGroup<S>>,
     config: CreateApiConfig,
-) -> Result<Router<S>, String>
+) -> Result<Router<S>, LinzError>
 where
     S: Clone + Send + Sync + 'static,
 {
+    let endpoints = endpoints.into();
     let spec = config
         .docs
         .as_ref()
@@ -193,17 +219,21 @@ where
 
     let shared = Arc::new(Shared {
         logger: config.logger.clone(),
+        max_body_size: config.max_body_size,
     });
 
     shared.info(&format!("Registering {} endpoints...", endpoints.len()));
 
     let mut routes: BTreeMap<String, (MethodRouter<S>, HashSet<Method>)> = BTreeMap::new();
-    let mut add_route = |path: &str, method: Method, method_router: MethodRouter<S>| -> Result<(), String> {
+    let mut add_route = |path: &str, method: Method, method_router: MethodRouter<S>| -> Result<(), LinzError> {
         let (axum_path, _) = utils::convert_path_params(path);
         let (existing, methods) = routes.remove(&axum_path).unwrap_or_default();
 
         if !methods.is_empty() && methods.contains(&method) {
-            return Err(format!("Duplicate route {method} {path}"));
+            return Err(LinzError::DuplicateRoute {
+                method: method.to_string(),
+                path: path.to_string(),
+            });
         }
 
         let mut methods = methods;
@@ -216,11 +246,13 @@ where
     for (method_path, endpoint) in endpoints {
         let (method, path) = utils::split_method_path(&method_path)?;
 
+        check_path_parameters(&endpoint, &path)?;
+
         if !registered_op_ids.insert(endpoint.operation_id().to_string()) {
-            return Err(format!(
-                "Duplicate operation ID \"{}\" for path {path}",
-                endpoint.operation_id()
-            ));
+            return Err(LinzError::DuplicateOperationId {
+                operation_id: endpoint.operation_id().to_string(),
+                path,
+            });
         }
 
         shared.info(&format!(
@@ -246,7 +278,7 @@ where
 
     // docs config
     if let (Some(docs), Some(spec)) = (&config.docs, &spec) {
-        let spec_json = serde_json::to_string(spec).map_err(|e| e.to_string())?;
+        let spec_json = serde_json::to_string(spec).map_err(|e| LinzError::Spec { message: e.to_string() })?;
         let title = &docs.spec.info.title;
         let html = docs
             .viewer
@@ -307,6 +339,38 @@ where
     Ok(app)
 }
 
+/// Checks that the path parameters of the key match the fields of the path DTO.
+fn check_path_parameters<S>(endpoint: &LinzEndpoint<S>, path: &str) -> Result<(), LinzError> {
+    let Some(path_schema) = &endpoint.meta().parameters.path else {
+        return Ok(());
+    };
+    let Some(shape) = schema::object_shape(&(path_schema.compiled)().root) else {
+        return Ok(());
+    };
+    let parameters = utils::path_param_names(path);
+
+    if !shape.open {
+        if let Some(parameter) = parameters.iter().find(|p| !shape.properties.contains(p)) {
+            return Err(LinzError::UndeclaredPathParameter {
+                operation_id: endpoint.operation_id().to_string(),
+                path: path.to_string(),
+                parameter: parameter.clone(),
+                declared: shape.properties,
+            });
+        }
+    }
+
+    if let Some(field) = shape.required.iter().find(|f| !parameters.contains(f)) {
+        return Err(LinzError::MissingPathParameter {
+            operation_id: endpoint.operation_id().to_string(),
+            path: path.to_string(),
+            field: field.clone(),
+        });
+    }
+
+    Ok(())
+}
+
 enum Failure {
     Api(ApiError),
     BodyParser(BodyParserError),
@@ -348,11 +412,30 @@ async fn process<S>(
             .collect(),
     );
 
-    let body = body
-        .collect()
-        .await
-        .map_err(|e| Failure::Internal(e.to_string()))?
-        .to_bytes();
+    let body = match shared.max_body_size {
+        Some(limit) => {
+            Limited::new(body, limit)
+                .collect()
+                .await
+                .map_err(|err| {
+                    if err.downcast_ref::<LengthLimitError>().is_some() {
+                        Failure::BodyParser(BodyParserError::new(
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            format!("Request body exceeds the limit of {limit} bytes"),
+                        ))
+                    } else {
+                        Failure::Internal(err.to_string())
+                    }
+                })?
+                .to_bytes()
+        }
+        None => {
+            body.collect()
+                .await
+                .map_err(|e| Failure::Internal(e.to_string()))?
+                .to_bytes()
+        }
+    };
     let content_type = parts
         .headers
         .get(header::CONTENT_TYPE)
@@ -383,6 +466,7 @@ async fn process<S>(
                     value: parsed.value,
                     files: parsed.files,
                     coerce: parsed.textual,
+                    case_insensitive: false,
                 }
             }
             None => {
@@ -390,12 +474,13 @@ async fn process<S>(
                     value: Value::Null,
                     files: FileStore::default(),
                     coerce: false,
+                    case_insensitive: false,
                 }
             }
         },
         queries: RawPart::textual(queries),
         params: RawPart::textual(params),
-        headers: RawPart::textual(headers),
+        headers: RawPart::textual(headers).case_insensitive(),
         cookies: RawPart::textual(cookies),
     };
     let ctx = Context {
@@ -413,9 +498,13 @@ async fn process<S>(
         }
     })?;
 
-    let status = result.status.unwrap_or(match method {
-        HttpMethod::Post => StatusCode::CREATED,
-        _ => StatusCode::OK,
+    let status = result.status.unwrap_or_else(|| {
+        meta.default_status
+            .and_then(|status| StatusCode::from_u16(status).ok())
+            .unwrap_or(match method {
+                HttpMethod::Post => StatusCode::CREATED,
+                _ => StatusCode::OK,
+            })
     });
 
     let descriptor = match meta.responses.get(&status.as_u16()) {

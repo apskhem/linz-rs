@@ -192,3 +192,79 @@ impl From<SecurityError> for ApiError {
         ApiError::detail(StatusCode::UNAUTHORIZED, value.to_string())
     }
 }
+
+/// An error raised while registering endpoints or building the OpenAPI document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinzError {
+    /// The key is not a `method:path` string.
+    InvalidKey { key: String },
+    /// The method is not one of `get`, `post`, `put`, `patch` or `delete`.
+    InvalidMethod { method: String, path: String },
+    /// The path does not start with `/`, or contains `?` or `#`.
+    InvalidPath { path: String },
+    /// Two endpoints share an operation ID.
+    DuplicateOperationId { operation_id: String, path: String },
+    /// Two routes share a method and path.
+    DuplicateRoute { method: String, path: String },
+    /// Merging groups produced duplicated keys.
+    DuplicateKeys { keys: Vec<String> },
+    /// The path has a parameter that the path DTO does not declare.
+    UndeclaredPathParameter {
+        operation_id: String,
+        path: String,
+        parameter: String,
+        declared: Vec<String>,
+    },
+    /// The path DTO requires a field that the path does not provide.
+    MissingPathParameter {
+        operation_id: String,
+        path: String,
+        field: String,
+    },
+    /// The OpenAPI document could not be built.
+    Spec { message: String },
+}
+
+impl fmt::Display for LinzError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidKey { key } => write!(f, "'{key}' is not a valid `method:path` key"),
+            Self::InvalidMethod { method, path } => write!(f, "Invalid method \"{method}\" for path {path}"),
+            Self::InvalidPath { path } => write!(f, "'{path}' is not a valid path"),
+            Self::DuplicateOperationId { operation_id, path } => {
+                write!(f, "Duplicate operation ID \"{operation_id}\" for path {path}")
+            }
+            Self::DuplicateRoute { method, path } => write!(f, "Duplicate route {method} {path}"),
+            Self::DuplicateKeys { keys } => write!(f, "Duplicated keys occured: {}", keys.join(", ")),
+            Self::UndeclaredPathParameter {
+                operation_id,
+                path,
+                parameter,
+                declared,
+            } => {
+                write!(
+                    f,
+                    "Path parameter \"{parameter}\" of {path} ({operation_id}) is not declared in its path type"
+                )?;
+                if declared.is_empty() {
+                    write!(f, ", which declares no fields")
+                } else {
+                    write!(f, " (declared: {})", declared.join(", "))
+                }
+            }
+            Self::MissingPathParameter {
+                operation_id,
+                path,
+                field,
+            } => {
+                write!(
+                    f,
+                    "The path type of {path} ({operation_id}) requires \"{field}\", which is not a parameter of the path"
+                )
+            }
+            Self::Spec { message } => write!(f, "Cannot build the OpenAPI document: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for LinzError {}

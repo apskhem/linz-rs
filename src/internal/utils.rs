@@ -20,6 +20,7 @@ use serde_json::{
 };
 
 use crate::core::HttpMethod;
+use crate::err::LinzError;
 
 /// Converts request headers into a JSON object. Header names are lower-cased and
 /// repeated headers are joined with `, `.
@@ -86,17 +87,22 @@ pub(crate) fn cookies_to_json(cookie_header: &str) -> Value {
 }
 
 /// Splits a `method:path` key, e.g. `get:/users/:id`, into its method and path.
-pub(crate) fn split_method_path(method_path: &str) -> Result<(HttpMethod, String), String> {
+pub(crate) fn split_method_path(method_path: &str) -> Result<(HttpMethod, String), LinzError> {
     let Some((method, path)) = method_path.split_once(':') else {
-        return Err(format!("'{method_path}' is not a valid `method:path` key"));
+        return Err(LinzError::InvalidKey {
+            key: method_path.to_string(),
+        });
     };
 
     let Some(method) = HttpMethod::parse(method) else {
-        return Err(format!("Invalid method \"{method}\" for path {path}"));
+        return Err(LinzError::InvalidMethod {
+            method: method.to_string(),
+            path: path.to_string(),
+        });
     };
 
     if !path.starts_with('/') || path.contains('?') || path.contains('#') {
-        return Err(format!("'{path}' is not a valid path"));
+        return Err(LinzError::InvalidPath { path: path.to_string() });
     }
 
     Ok((method, path.to_string()))
@@ -120,6 +126,16 @@ pub(crate) fn convert_path_params(path: &str) -> (String, Vec<String>) {
     let params = re.captures_iter(path).map(|c| c[1].to_string()).collect();
 
     (new_path, params)
+}
+
+/// Returns the names of the path parameters, written as `:name`, `{name}` or `{*name}`.
+pub(crate) fn path_param_names(path: &str) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r":([^/]+)|\{\*?([^}/]+)\}").unwrap());
+
+    re.captures_iter(path)
+        .filter_map(|c| c.get(1).or_else(|| c.get(2)).map(|m| m.as_str().to_string()))
+        .collect()
 }
 
 /// Converts an identifier like `echoPathSimple` or `echo-path simple` into `EchoPathSimple`.
@@ -227,6 +243,12 @@ mod tests {
             "/api/v1/users/{userId}/orders/{orderId}/items/{itemId}",
             &["userId", "orderId", "itemId"],
         );
+    }
+
+    #[test]
+    fn finds_path_param_names() {
+        assert_eq!(path_param_names("/a/:id/b/{name}/{*rest}"), ["id", "name", "rest"]);
+        assert!(path_param_names("/a/b").is_empty());
     }
 
     #[test]

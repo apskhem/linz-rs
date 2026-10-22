@@ -2,7 +2,11 @@ use std::collections::HashSet;
 
 use oas3::spec;
 
-use crate::core::LinzEndpointGroup;
+use crate::core::{
+    IntoTag,
+    LinzEndpointGroup,
+};
+use crate::err::LinzError;
 use crate::internal::utils;
 use crate::security::AppliedSecurity;
 
@@ -16,7 +20,7 @@ use crate::security::AppliedSecurity;
 pub fn merge_endpoint_groups<S>(
     prefix: &str,
     groups: Vec<LinzEndpointGroup<S>>,
-) -> Result<LinzEndpointGroup<S>, String> {
+) -> Result<LinzEndpointGroup<S>, LinzError> {
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
     let mut merged = Vec::new();
@@ -35,7 +39,7 @@ pub fn merge_endpoint_groups<S>(
     }
 
     if !duplicates.is_empty() {
-        return Err(format!("Duplicated keys occured: {}", duplicates.join(", ")));
+        return Err(LinzError::DuplicateKeys { keys: duplicates });
     }
 
     Ok(merged)
@@ -52,6 +56,34 @@ pub struct GroupConfig {
     pub hidden: Option<bool>,
     /// Applied to endpoints that do not set `deprecated` themselves.
     pub deprecated: Option<bool>,
+}
+
+impl GroupConfig {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a tag, given by name (`"Users"`) or as an [`oas::Tag`](spec::Tag) object.
+    pub fn tag(mut self, tag: impl IntoTag) -> Self {
+        self.tags.push(tag.into_tag());
+        self
+    }
+
+    /// Adds an authentication step: `scheme.apply([..scopes])`, or `&scheme` for no scopes.
+    pub fn security(mut self, security: impl Into<AppliedSecurity>) -> Self {
+        self.security.push(security.into());
+        self
+    }
+
+    pub fn hidden(mut self, hidden: bool) -> Self {
+        self.hidden = Some(hidden);
+        self
+    }
+
+    pub fn deprecated(mut self, deprecated: bool) -> Self {
+        self.deprecated = Some(deprecated);
+        self
+    }
 }
 
 /// Applies a common configuration to all endpoints within a group.

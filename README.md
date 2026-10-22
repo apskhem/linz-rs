@@ -21,16 +21,18 @@ struct User {
     id: u32,
 }
 
-let endpoints: LinzEndpointGroup = vec![(
-    "get:/users/:user_id".into(),
-    Endpoint::new("getUser")
-        .path::<UserPath>()
-        .returns(200, JsonBody::new::<User>()) // the handler must return a `User`
-        .response(404, true)
-        .handler(|req, _ctx| async move { Ok(User { id: req.params.user_id }) }),
-)];
+let api = Api::new()
+    .get(
+        "/users/:user_id",
+        Endpoint::new("getUser")
+            .path::<UserPath>()
+            .returns(200, JsonBody::new::<User>()) // the handler must return a `User`
+            .response(404, true),
+        |req, _ctx| async move { Ok(User { id: req.params.user_id }) },
+    )
+    .config(GroupConfig::new().tag("Users"));
 
-let app = create_api(Router::new(), endpoints, CreateApiConfig {
+let app = create_api(Router::new(), Api::new().nest("/v1", api), CreateApiConfig {
     docs: Some(DocsConfig {
         viewer: DocsViewer::Scalar,
         spec: BuilderConfig::new("My API", "1.0.0"), // built from the endpoints
@@ -54,6 +56,9 @@ See `examples/bootstrap.rs` for a complete example (`cargo run --example bootstr
   time. Responses are also validated against the schema declared for their status (or the
   default response) at runtime; undeclared statuses and constraint violations respond `500`.
 - Handlers can read the router state (`Router::with_state`) through `Context::state`.
+- Registration fails early (`LinzError`) on invalid keys, duplicate routes or operation IDs,
+  and path parameters that do not match the path type.
+- Request bodies are limited to 2 MiB by default (`413` beyond).
 - Without an explicit status, `post` endpoints respond `201` and others `200`.
 - Errors returned as `ApiError` are rendered as `{ "errors": [...] }` with their status.
 - Unmatched requests respond `404` (`Cannot find <METHOD> <path>`), after an optional

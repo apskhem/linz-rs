@@ -17,7 +17,10 @@ use crate::core::{
     ResponseSpec,
     TypeSchema,
 };
-use crate::err::JsonApiErrorResponse;
+use crate::err::{
+    JsonApiErrorResponse,
+    LinzError,
+};
 use crate::internal::{
     schema,
     utils,
@@ -83,7 +86,7 @@ impl BuilderConfig {
 ///
 /// [`crate::create_api`] calls it when [`crate::DocsConfig`] is set; call it directly to
 /// export the document, e.g. to a file.
-pub fn build_json<S>(config: &BuilderConfig, endpoints: &[(String, LinzEndpoint<S>)]) -> Result<Value, String> {
+pub fn build_json<S>(config: &BuilderConfig, endpoints: &[(String, LinzEndpoint<S>)]) -> Result<Value, LinzError> {
     let mut generator = SchemaGenerator::new(schema::docs_settings());
     let mut paths = Map::new();
     let mut schemas = Map::new();
@@ -334,8 +337,8 @@ pub fn build_json<S>(config: &BuilderConfig, endpoints: &[(String, LinzEndpoint<
 
 // -- helpers
 
-fn to_value(value: &impl serde::Serialize) -> Result<Value, String> {
-    serde_json::to_value(value).map_err(|e| e.to_string())
+fn to_value(value: &impl serde::Serialize) -> Result<Value, LinzError> {
+    serde_json::to_value(value).map_err(|e| LinzError::Spec { message: e.to_string() })
 }
 
 fn schema_value(schema: schemars::Schema) -> Value {

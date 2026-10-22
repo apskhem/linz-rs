@@ -25,7 +25,7 @@ This manual has three parts:
 - [7. Responses](#7-responses)
 - [8. Errors](#8-errors)
 - [9. Security](#9-security)
-- [10. Grouping endpoints](#10-grouping-endpoints)
+- [10. Organizing endpoints](#10-organizing-endpoints)
 - [11. OpenAPI document and docs viewer](#11-openapi-document-and-docs-viewer)
 - [12. `create_api` configuration and state](#12-create_api-configuration-and-state)
 - [13. How-to recipes](#13-how-to-recipes)
@@ -42,16 +42,18 @@ This manual has three parts:
 | --- | --- | --- |
 | DTO | any `JsonSchema + DeserializeOwned` type | Describes a request part (query, header, path, cookie or body) and is validated against its schema. |
 | Endpoint builder | `Endpoint<Q, H, P, C, B, R>` | Declares the parameters, body, responses, security and metadata of one operation. `R` is the response type, set by `.returns(..)`. |
-| Endpoint | `LinzEndpoint<S = ()>` | A finished, type-erased endpoint, produced by `Endpoint::handler`. `S` is the router state. |
-| Endpoint group | `LinzEndpointGroup<S = ()>` = `Vec<(String, LinzEndpoint<S>)>` | A list of `method:path` keys and endpoints, e.g. `"get:/users/:id"`. |
+| Route builder | `Api<S = ()>` | Collects endpoints with their method, path and handler: `.get(path, endpoint, handler)`, `.nest(..)`, `.config(..)`. The recommended way to declare routes. |
+| Endpoint | `LinzEndpoint<S = ()>` | A finished, type-erased endpoint. `S` is the router state. |
+| Endpoint group | `LinzEndpointGroup<S = ()>` = `Vec<(String, LinzEndpoint<S>)>` | The Linz-style list of `method:path` keys and endpoints. `Api` converts to and from it. |
 | Sender body | `SenderBody<T>` | A typed request or response body with a content type (`JsonBody`, `FormDataBody`, ...). |
 | Security | `Security` / `AppliedSecurity` | An authentication scheme, and that scheme applied to an endpoint with scopes. |
 | Adapter | `create_api` | Registers endpoints, the docs, CORS and the fallback on an `axum::Router`. |
 | Builder | `build_json` | Produces the OpenAPI 3.1 document. `create_api` calls it for you when docs are enabled. |
 
 Everything public is re-exported from the crate root, so `use linz_rs::*;` is usually enough.
-The `security` module (`AuthenticationScheme`, `In`, `oauth2_flows`) and the `oas` module (OpenAPI
-types such as `Info`, `Tag`, `Server` and `Example`, re-exported from `oas3::spec`) are used by path.
+The `security` module (`AuthenticationScheme`, `In`, `oauth2_flows`), the `err` module
+(`JsonApiErrorSource`, ...) and the `oas` module (OpenAPI types such as `Info`, `Tag`, `Server`
+and `Example`, re-exported from `oas3::spec`) are used by path.
 
 ---
 
@@ -105,39 +107,37 @@ struct User {
     username: String,
 }
 
-fn endpoints() -> LinzEndpointGroup {
-    vec![
-        (
-            "get:/users/:user_id".to_string(),
+fn users() -> Api {
+    Api::new()
+        .get(
+            "/users/:user_id",
             Endpoint::new("getUser")
                 .summary("Get a user")
                 .path::<UserPath>()
                 .returns(200, JsonBody::new::<User>())
-                .response(404, "The user does not exist")
-                .handler(|req, _ctx| async move {
-                    if req.params.user_id != 1 {
-                        return Err(ApiError::detail(StatusCode::NOT_FOUND, "User not found"));
-                    }
-                    Ok(User { id: 1, username: "alice".into() })
-                }),
-        ),
-        (
-            "post:/users".to_string(),
+                .response(404, "The user does not exist"),
+            |req, _ctx| async move {
+                if req.params.user_id != 1 {
+                    return Err(ApiError::detail(StatusCode::NOT_FOUND, "User not found"));
+                }
+                Ok(User { id: 1, username: "alice".into() })
+            },
+        )
+        .post(
+            "/users",
             Endpoint::new("createUser")
                 .request_body(JsonBody::new::<CreateUser>())
-                .returns(201, JsonBody::new::<User>())
-                .handler(|req, _ctx| async move {
-                    Ok(User { id: 2, username: req.body.username })
-                }),
-        ),
-    ]
+                .returns(201, JsonBody::new::<User>()),
+            |req, _ctx| async move { Ok(User { id: 2, username: req.body.username }) },
+        )
+        .config(GroupConfig::new().tag("Users"))
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = create_api(
         Router::new(),
-        endpoints(),
+        users(),
         CreateApiConfig {
             cors: Some(CorsConfig::Permissive),
             docs: Some(DocsConfig {
@@ -272,7 +272,7 @@ fn default_limit() -> u32 { 20 }
 | --- | --- | --- |
 | `queries` | object of `string` | form-urlencoded decoding (`+` becomes a space). When a key repeats, the **last** occurrence wins. |
 | `params` | object of `string` | Percent-decoded by axum. |
-| `headers` | object of `string`, every header of the request | Names are lower-case. Repeated headers are joined with `", "`. Non-UTF-8 values are skipped. |
+| `headers` | object of `string`, every header of the request | Matched to the DTO's field names **case-insensitively**. Repeated headers are joined with `", "`. Non-UTF-8 values are skipped. |
 | `cookies` | object of `string` | Parsed from `Cookie`. Values are percent-decoded and the last duplicate wins. |
 | `body` | see [6](#6-request-bodies) | `null` when the body is empty. |
 
@@ -280,14 +280,15 @@ Every query, cookie and form value is a single string, so DTO fields for them ar
 `Vec`s. To accept a list in a query parameter, use one value with a delimiter (`?tags=a,b`) and
 split it in the handler.
 
-Because header names are lower-case, rename header DTO fields:
+Header DTO fields are renamed to the header's name. Any casing works, and the docs show the one
+you choose:
 
 ```rust
 #[derive(Deserialize, JsonSchema)]
 struct ClientHeaders {
-    #[serde(rename = "x-request-id")]
+    #[serde(rename = "X-Request-Id")]
     request_id: Option<String>,
-    #[serde(rename = "user-agent")]
+    #[serde(rename = "User-Agent")]
     user_agent: String,
 }
 ```
@@ -302,14 +303,32 @@ an undeclared part is neither validated nor documented. As a response type, `()`
 
 ## 5. Endpoints
 
-### 5.1 Keys
+An endpoint has three pieces: a **route** (method and path), a **declaration** (the `Endpoint`
+builder) and a **handler**. The `Api` route builder takes all three at once:
 
-Each endpoint is registered under a `method:path` key:
+```rust
+Api::new().get(
+    "/users/:id",                                                   // route
+    Endpoint::new("getUser").path::<IdPath>().returns(200, JsonBody::new::<User>()), // declaration
+    |req, ctx| async move { Ok(User { id: req.params.id }) },      // handler
+)
+```
 
-- The method is one of `get`, `post`, `put`, `patch` or `delete` (lower-case).
+[Section 10](#10-organizing-endpoints) covers `Api` in full, including the Linz-style
+`method:path` tuples it replaces.
+
+### 5.1 Paths
+
+- The methods are `get`, `post`, `put`, `patch` and `delete` (`Api::get`/`post`/`put`/`patch`/`delete`,
+  or `Api::route(HttpMethod::.., ..)`).
 - The path must start with `/` and must not contain `?` or `#`.
 - Path parameters can be written as `:name` (Linz style) or `{name}` (axum style). Both become
   `{name}` in the router and in the docs. Let a parameter occupy a whole path segment.
+- **Path parameters are checked against the path DTO when `create_api` runs.** Each parameter
+  must be a field of the `.path::<P>()` type, and each required field must be a parameter.
+  Otherwise `create_api` returns `LinzError::UndeclaredPathParameter` or
+  `LinzError::MissingPathParameter`, instead of every request failing with a 400. Map types such
+  as `HashMap<String, String>` accept any parameter.
 - Consecutive slashes are collapsed. Paths are matched exactly, so `/users` and `/users/` are
   different routes.
 
@@ -329,7 +348,7 @@ These methods declare responses (see [7](#7-responses)):
 
 | Method | Effect |
 | --- | --- |
-| `.returns(status, SenderBody<R>)` | Declares the main response and **sets the handler's response type to `R`**. Call it once. |
+| `.returns(status, SenderBody<R>)` | Declares the main response, **sets the handler's response type to `R`**, and makes `status` the default status. Call it once. |
 | `.returns_default(SenderBody<R>)` | Like `.returns`, but declares the `default` response. |
 | `.response(status, spec)` | Declares another response: a `SenderBody<R>` of the same type, or `true`/a description for a JSON:API error response. |
 | `.default_response(SenderBody<R>)` | Declares the response for statuses without their own declaration. |
@@ -339,11 +358,11 @@ Metadata methods:
 | Method | Effect |
 | --- | --- |
 | `.summary(s)`, `.description(s)` | Docs. When no summary is set, the summary is the operation ID. |
-| `.tag(oas::Tag)`, `.tags(iter)` | Docs. Tags are de-duplicated by name in the document. |
+| `.tag("Users")`, `.tags(["A", "B"])` | Docs. Accepts names or `oas::Tag` objects. Tags are de-duplicated by name in the document. |
 | `.hidden(bool)` | Leaves the endpoint out of the docs. It is still routed. |
 | `.deprecated(bool)` | Docs. |
-| `.security(AppliedSecurity)` | Adds an authentication step (see [9](#9-security)). Can be called repeatedly. |
-| `.handler(f)` | Finishes the builder and returns a `LinzEndpoint<S>`. Requires `.returns`/`.returns_default` first. |
+| `.security(scheme.apply(["scope"]))` / `.security(&scheme)` | Adds an authentication step, with or without scopes (see [9](#9-security)). Can be called repeatedly. |
+| `.handler(f)` | Finishes the builder and returns a `LinzEndpoint<S>`. `Api` calls it for you. |
 
 Operation IDs must be unique within one `create_api` call.
 
@@ -352,7 +371,7 @@ Operation IDs must be unique within one `create_api` call.
 ```rust
 F: Fn(Request<Q, H, P, C, B>, Context<S>) -> Fut + Send + Sync + 'static,
 Fut: Future<Output = Result<O, ApiError>> + Send + 'static,
-O: Into<HttpResponse<R>>, // R itself, or HttpResponse<R>
+O: IntoHttpResponse<R>, // R itself, or HttpResponse<R>
 ```
 
 **Arguments:**
@@ -361,15 +380,17 @@ O: Into<HttpResponse<R>>, // R itself, or HttpResponse<R>
 - `Context<S>` contains:
   - `state: S`: the router state (see [12.3](#123-state)).
   - `security: Vec<AppliedSecurity>`: the securities of the endpoint, including their scopes.
-  - `extensions: http::Extensions`: values inserted by the security handlers.
+  - `extensions: http::Extensions`: values inserted by the security handlers. Read them with
+    `ctx.extension::<T>()?`, which responds `500` when the value is missing.
   - `request: http::request::Parts`: the raw method, URI, version, headers and axum extensions.
 
 **Return value:**
 
-- `Ok(value)` with a value of type `R` responds with the default status. Return
-  `Ok(HttpResponse<R>)` to set the status, headers or a stream (see [7.3](#73-httpresponse)).
-- `Err(ApiError)` responds with a JSON:API error (see [8](#8-errors)), and `?` works with
-  `ApiError`.
+- `Ok(value)` with a value of type `R` responds with the status passed to `.returns`. Return
+  `Ok(HttpResponse<R>)` to set another status, headers or a stream (see [7.3](#73-httpresponse)).
+- `Err(ApiError)` responds with a JSON:API error (see [8](#8-errors)).
+- `?` works with `ApiError`, and with your own error types once you implement
+  `From<YourError> for ApiError` (see [13.17](#1317-use--with-your-own-error-types)).
 - A handler that only returns errors needs the success type spelled out:
   `Err::<User, _>(ApiError::detail(..))`.
 
@@ -381,10 +402,13 @@ Each of these is a compile error:
 
 ```rust
 // The handler returns a type other than the declared one.
-Endpoint::new("getUser")
-    .returns(200, JsonBody::new::<User>())
-    .handler(|_, _| async move { Ok("not a user".to_string()) });
-// error: the trait bound `HttpResponse<User>: From<String>` is not satisfied
+Api::new().get(
+    "/users/:id",
+    Endpoint::new("getUser").path::<IdPath>().returns(200, JsonBody::new::<User>()),
+    |_, _| async move { Ok("not a user".to_string()) },
+);
+// error: the handler returns `String`, but the endpoint's response type is `User`
+//        note: the response type is set by `.returns(status, body)`
 
 // A second body response has another type.
 Endpoint::new("getUser")
@@ -398,7 +422,13 @@ Endpoint::new("ping").handler(|_, _| async move { Ok(()) });
 //        (the endpoint has no declared response type; call `.returns(status, body)` ...)
 ```
 
-What the compiler cannot check, and is enforced at runtime with a `500`:
+**Checked when `create_api` runs**, returning a `LinzError` before the server starts:
+
+- invalid methods or paths;
+- duplicate routes or operation IDs;
+- path parameters that don't match the path DTO.
+
+**Checked per request**, responding `500`:
 
 - schema constraints of the response (e.g. `range`, `length`) for the actual value;
 - a status the handler returns that has no declaration.
@@ -437,6 +467,7 @@ strings, which is coerced and then validated against the same schema.
   `400 Unknown encoding: <name>`.
 - **`text/plain` and `text/html` request bodies** are not parsed, so they respond `415`. Use
   those kinds for responses.
+- **Size**: bodies larger than `CreateApiConfig::max_body_size` (2 MiB by default) respond `413`.
 
 ### 6.2 Optional and empty bodies
 
@@ -494,7 +525,7 @@ same applies to query strings and cookies.
 
 ```rust
 Endpoint::new("getUser")
-    .returns(200, JsonBody::new::<User>())        // main response: R = User
+    .returns(200, JsonBody::new::<User>())        // main response: R = User, default status 200
     .response(203, JsonBody::new::<User>())       // another body of type R
     .response(404, true)                          // JSON:API error, reason phrase as description
     .response(409, "The username is taken")       // JSON:API error with a description
@@ -512,8 +543,12 @@ and is documented without a schema.
 
 ### 7.2 Status selection and validation
 
-1. **Choose the status.** The status is `HttpResponse::status`. When it is unset, the status is
-   `201 Created` for `post` endpoints and `200 OK` for all others.
+1. **Choose the status**, in this order:
+   - `HttpResponse::status`, when the handler sets one;
+   - otherwise the status passed to `.returns(status, ..)`;
+   - otherwise `201 Created` for `post` endpoints and `200 OK` for all others.
+
+   For example, `.returns(204, JsonBody::new::<()>())` with `Ok(())` responds `204`.
 2. **Find the declaration** for that status, falling back to the default response.
 3. **No usable declaration.** If the declaration is missing, or is `true`/a description, the
    response is `500 Internal server error` and the logger records
@@ -531,7 +566,7 @@ and is documented without a schema.
 ### 7.3 `HttpResponse`
 
 ```rust
-HttpResponse::new(body)                         // status unset (201 for post, 200 otherwise)
+HttpResponse::new(body)                         // the default status (see 7.2)
 HttpResponse::with_status(StatusCode::ACCEPTED, body)
 HttpResponse::without_body(StatusCode::NO_CONTENT, None)
 HttpResponse::stream(StatusCode::OK, axum::body::Body::from_stream(stream))
@@ -539,8 +574,8 @@ HttpResponse::stream(StatusCode::OK, axum::body::Body::from_stream(stream))
     .header(header::LOCATION, HeaderValue::from_static("/users/2"))
 ```
 
-The fields (`status`, `headers`, `body: ResponseBody<T>`) are public, too. `HttpResponse<R>`
-implements `From<R>`, which is why handlers can return `Ok(value)` directly.
+The fields (`status`, `headers`, `body: ResponseBody<T>`) are public, too. Handlers can return
+`Ok(value)` directly because both `R` and `HttpResponse<R>` implement `IntoHttpResponse<R>`.
 
 ### 7.4 Empty and optional bodies
 
@@ -616,6 +651,14 @@ collected together, in the order body, queries, params, headers, cookies. The re
 `result` is a list of `{ path, message }` for schema violations. It is a plain string when the
 value matched the schema but serde still failed to deserialize it.
 
+### 8.3 Registration errors (`LinzError`)
+
+`create_api`, `build_json` and `merge_endpoint_groups` return `Result<_, LinzError>`.
+`LinzError` is an enum that implements `std::error::Error`, so `?` works with `anyhow`,
+`Box<dyn Error>` and the like. Match on the variants (for example
+`LinzError::UndeclaredPathParameter { parameter, declared, .. }`) or print it. The messages are
+listed in [17.3](#173-registration-errors).
+
 ---
 
 ## 9. Security
@@ -668,7 +711,7 @@ pool, in the closure.
 | `SecurityType` | `token` | Failure before the handler (401) |
 | --- | --- | --- |
 | `Http { scheme, .. }` | The credentials after the scheme in `Authorization`. The scheme is matched case-insensitively. | `Missing authorization header`, `Invalid authorization header value`, `Invalid authorization scheme`, `Missing authorization token` |
-| `ApiKey { name, in: In::Header }` | The value of header `name` | `Missing API key parameter`, `Invalid UTF-8 header value` |
+| `ApiKey { name, in: In::Header }` | The value of header `name` (case-insensitive) | `Missing API key parameter`, `Invalid UTF-8 header value` |
 | `ApiKey { name, in: In::Query }` | The value of query parameter `name` | `Missing API key parameter` |
 | `ApiKey { name, in: In::Cookie }` | The value of cookie `name` (the last one wins) | `Missing API key parameter` |
 | `OAuth2 { flows }` / `OpenIdConnect { .. }` | The `Bearer` token of `Authorization` | same as `Http` |
@@ -680,24 +723,27 @@ For `Http` with `Basic`, the token is the base64 credentials. Decode them yourse
 
 ```rust
 let auth = bearer_auth();
+let api_key = api_key();
 
 Endpoint::new("deleteUser")
-    .security(auth.apply(["users:write"]))       // with scopes
-    .security(api_key.apply(Vec::<String>::new())) // without scopes
+    .security(auth.apply(["users:write"])) // with scopes
+    .security(&api_key)                    // without scopes
 ```
 
 - Securities run **sequentially, in order, and all of them must succeed**.
-- The `Extensions` they return are merged into `ctx.extensions`, which the handler reads:
+- The `Extensions` they return are merged into `ctx.extensions`. Read them in the handler with
+  `ctx.extension::<T>()?`, which responds `500 Missing request extension ...` when the value is
+  missing:
 
 ```rust
-.handler(|req, ctx| async move {
-    let user = ctx.extensions.get::<CurrentUser>().cloned().unwrap();
+|req, ctx| async move {
+    let user = ctx.extension::<CurrentUser>()?;
     ...
-})
+}
 ```
 
 - Securities can also be applied to a whole group with `GroupConfig::security`
-  (see [10](#10-grouping-endpoints)).
+  (see [10](#10-organizing-endpoints)).
 - Endpoints with security get a `401` JSON:API response in the docs. The schemes are listed
   under `components.securitySchemes`, keyed by `Security::name`.
 
@@ -727,44 +773,89 @@ linz-rs does not implement OAuth2 itself. Your handler validates the bearer toke
 
 ---
 
-## 10. Grouping endpoints
+## 10. Organizing endpoints
 
-Groups let you organize endpoints by module ("controller") and apply shared configuration.
+### 10.1 The `Api` route builder
+
+`Api<S>` collects endpoints. Each method returns the builder, so routes chain:
+
+| Method | Effect |
+| --- | --- |
+| `Api::new()` / `Api::<AppState>::new()` | An empty builder. Name the state type when handlers read `ctx.state` (see [12.3](#123-state)). |
+| `.get/.post/.put/.patch/.delete(path, endpoint, handler)` | Adds an endpoint. |
+| `.route(HttpMethod::Get, path, endpoint, handler)` | The same, with the method as a value. |
+| `.endpoint(method, path, linz_endpoint)` | Adds an endpoint already finished with `Endpoint::handler`. |
+| `.nest(prefix, other)` | Adds every endpoint of another `Api` (or `LinzEndpointGroup`) under `prefix`. |
+| `.merge(other)` | Adds every endpoint of `other` without a prefix. |
+| `.config(GroupConfig)` | Applies tags, security, `hidden` and `deprecated` to every endpoint **added so far**. |
+| `.endpoints()` / `.into_endpoints()` | The `method:path` keys and endpoints. |
+
+A typical layout has one function per controller, configured once and nested by version:
 
 ```rust
-fn users_controller() -> LinzEndpointGroup {
-    apply_group_config(
-        vec![
-            ("get:/users".into(), list_users()),
-            ("get:/users/:id".into(), get_user()),
-        ],
-        GroupConfig {
-            tags: vec![oas::Tag { name: "Users".into(), description: None, extensions: Default::default() }],
-            security: vec![bearer_auth().apply(["users:read"])],
-            hidden: None,
-            deprecated: None,
-        },
-    )
+fn users() -> Api {
+    Api::new()
+        .get("/users", list_users_endpoint(), list_users)
+        .get("/users/:id", get_user_endpoint(), get_user)
+        .config(
+            GroupConfig::new()
+                .tag("Users")
+                .security(bearer_auth().apply(["users:read"])),
+        )
 }
 
-let router = merge_endpoint_groups("/v1", vec![users_controller(), posts_controller()])?;
-// keys become "get:/v1/users", "get:/v1/users/:id", ...
+let api = Api::new()
+    .nest("/v1", Api::new().merge(users()).merge(posts()))
+    .get("/health", health_endpoint(), |_, _| async move { Ok("ok".to_string()) });
+// keys: "get:/v1/users", "get:/v1/users/:id", ..., "get:/health"
+
+let app = create_api(Router::new(), api, config)?;
 ```
 
-`apply_group_config(group, config)` changes every endpoint in the group:
+- `create_api` accepts an `Api` or a `LinzEndpointGroup`.
+- Mistakes are reported by `create_api`, not by the builder: invalid paths, duplicate routes
+  (including ones created by nesting) and mismatched path parameters.
+- Handlers can be closures or `async fn`s with the matching signature, e.g.
+  `async fn get_user(req: Request<(), (), IdPath>, ctx: Context) -> Result<User, ApiError>`.
+
+### 10.2 `GroupConfig`
+
+```rust
+GroupConfig::new()
+    .tag("Users")                      // or an oas::Tag
+    .security(auth.apply(["read"]))    // or &auth for no scopes
+    .hidden(false)
+    .deprecated(true)
+```
 
 - `tags` and `security` are **appended** to each endpoint's own.
 - `hidden` and `deprecated` are applied only to endpoints that did not set them.
 
-`merge_endpoint_groups(prefix, groups)` combines groups:
+The fields are public, so a struct literal with `..Default::default()` works too.
 
-- It inserts `prefix` after the method of every key and collapses double slashes, so `"/v1/"`
-  works too.
-- It returns `Err("Duplicated keys occured: ...")` when two endpoints end up with the same key.
-- It can be nested: merge controllers into a version group, then merge versions.
+### 10.3 Linz-style groups
 
-Both functions are generic over the state type `S`. All groups merged together must use the
-same `S`.
+The Linz API is still available. A `LinzEndpointGroup` is a `Vec` of `method:path` keys and
+endpoints finished with `.handler(..)`:
+
+```rust
+fn users() -> LinzEndpointGroup {
+    let group = vec![
+        ("get:/users/:id".to_string(), Endpoint::new("getUser")
+            .path::<IdPath>()
+            .returns(200, JsonBody::new::<User>())
+            .handler(|req, _| async move { Ok(User { id: req.params.id }) })),
+    ];
+    apply_group_config(group, GroupConfig::new().tag("Users"))
+}
+
+let router = merge_endpoint_groups("/v1", vec![users(), posts()])?; // keys: "get:/v1/users/:id", ...
+```
+
+- `apply_group_config(group, config)` works like `Api::config`.
+- `merge_endpoint_groups(prefix, groups)` works like `Api::nest`, but returns
+  `LinzError::DuplicateKeys` immediately.
+- `Api::from(group)` and `LinzEndpointGroup::from(api)` convert between the two styles.
 
 ---
 
@@ -814,13 +905,12 @@ DocsConfig {
 
 ### 11.3 Building the document yourself
 
-`build_json(&config, &endpoints)` returns the document as a `serde_json::Value`, for example to
-write it to a file in CI or to generate clients. It borrows the endpoints, so call it before
-handing them to `create_api`. `LinzEndpoint` is cheap to `clone()` (its handler is an `Arc`).
+`build_json(&config, endpoints)` returns the document as a `serde_json::Value`, for example to
+write it to a file in CI or to generate clients:
 
 ```rust
-let endpoints = endpoints();
-let document = build_json(&BuilderConfig::new("My API", "1.0.0"), &endpoints)?;
+let api = api();
+let document = build_json(&BuilderConfig::new("My API", "1.0.0"), api.endpoints())?;
 std::fs::write("openapi.json", serde_json::to_string_pretty(&document)?)?;
 ```
 
@@ -863,20 +953,14 @@ Void bodies and octet-stream bodies have no schema component. Schemas use JSON S
 ## 12. `create_api` configuration and state
 
 ```rust
-pub fn create_api<S>(app: Router<S>, endpoints: LinzEndpointGroup<S>, config: CreateApiConfig)
-    -> Result<Router<S>, String>
+pub fn create_api<S>(app: Router<S>, endpoints: impl Into<LinzEndpointGroup<S>>, config: CreateApiConfig)
+    -> Result<Router<S>, LinzError>
 where
     S: Clone + Send + Sync + 'static
 ```
 
-`create_api` returns `Err` for:
-
-- an invalid key or method;
-- a duplicate operation ID;
-- a duplicate method and path, including clashes with the docs routes;
-- a failure to build the OpenAPI document.
-
-See [17.3](#173-registration-errors) for the messages.
+`endpoints` is an `Api<S>` or a `LinzEndpointGroup<S>`. Registration errors are described in
+[8.3](#83-registration-errors-linzerror).
 
 ### 12.1 `CreateApiConfig`
 
@@ -886,6 +970,7 @@ See [17.3](#173-registration-errors) for the messages.
 | `docs` | `None` | See [11.2](#112-serving-the-docs). |
 | `logger` | `None` | `Arc<dyn Logger>` (see [12.2](#122-logger)). |
 | `fallback_handler` | `None` | Called for unmatched requests. Return `Some(response)` to handle the request, or `None` to fall through to the 404. |
+| `max_body_size` | `Some(DEFAULT_MAX_BODY_SIZE)` (2 MiB) | The maximum request body size in bytes. Larger bodies respond `413`. `None` removes the limit. |
 
 ### 12.2 Logger
 
@@ -899,7 +984,8 @@ See [17.3](#173-registration-errors) for the messages.
 ### 12.3 State
 
 Handlers receive the router state as `ctx.state`, the same state axum provides with
-`Router::with_state`:
+`Router::with_state`. With the `Api` builder, name the state type **once**, on the builder,
+and the handlers need no annotations:
 
 ```rust
 #[derive(Clone)]
@@ -907,44 +993,48 @@ struct AppState {
     db: Arc<Database>,
 }
 
-fn get_user() -> LinzEndpoint<AppState> {
-    Endpoint::new("getUser")
-        .path::<IdPath>()
-        .returns(200, JsonBody::new::<User>())
-        .response(404, true)
-        .handler(|req, ctx: Context<AppState>| async move {
+fn users() -> Api<AppState> {
+    Api::<AppState>::new().get(
+        "/users/:id",
+        Endpoint::new("getUser")
+            .path::<IdPath>()
+            .returns(200, JsonBody::new::<User>())
+            .response(404, true),
+        |req, ctx| async move {
             ctx.state
                 .db
                 .find_user(req.params.id)
                 .await
                 .ok_or_else(|| ApiError::detail(StatusCode::NOT_FOUND, "User not found"))
-        })
+        },
+    )
 }
 
-let app: Router = create_api(Router::new(), vec![("get:/users/:id".into(), get_user())], config)?
-    .with_state(AppState { db });
+let app: Router = create_api(Router::new(), users(), config)?.with_state(AppState { db });
 ```
 
 How the state type flows:
 
-- **Annotate the context** when a handler reads the state: `ctx: Context<AppState>`. Rust cannot
-  infer `S` for a closure from the function's return type. axum handlers have the same
-  requirement with `State<AppState>`.
-- **Handlers that do not read the state** need no annotation. Their `S` is inferred from where
-  the endpoint is used.
-- **Every endpoint passed to one `create_api` call has the same `S`.** A function returning
-  `LinzEndpointGroup` (that is, `S = ()`) cannot be mixed with `LinzEndpointGroup<AppState>`.
-  Write reusable, state-independent groups generically:
+- **`Api::<AppState>::new()`** fixes `S` before the handlers are type-checked, so `ctx.state` is
+  typed. `Api::new()` inside a function returning `Api<AppState>` is **not** enough, because Rust
+  does not use the return type when checking the closures.
+- **Handlers that do not read the state** work with `Api::new()`. Their `S` is inferred from
+  where the builder is used.
+- **Linz-style groups** (`Endpoint::handler` directly) need the context annotated:
+  `|req, ctx: Context<AppState>| ...`.
+- **Every endpoint passed to one `create_api` call has the same `S`.** Write reusable,
+  state-independent routes generically:
 
 ```rust
-fn health<S: Clone + Send + Sync + 'static>() -> LinzEndpointGroup<S> {
-    vec![(
-        "get:/health".into(),
-        Endpoint::new("health")
-            .returns(200, TextBody::new())
-            .handler(|_, _| async move { Ok("ok".to_string()) }),
-    )]
+fn health<S: Clone + Send + Sync + 'static>() -> Api<S> {
+    Api::new().get(
+        "/health",
+        Endpoint::new("health").returns(200, TextBody::new()),
+        |_, _| async move { Ok("ok".to_string()) },
+    )
 }
+
+let api = Api::<AppState>::new().merge(users()).merge(health());
 ```
 
 `create_api` returns `Router<S>`. Call `.with_state(state)` on it before serving.
@@ -990,39 +1080,41 @@ struct TodoInput {
 #[derive(Serialize, JsonSchema, Clone)]
 struct Todo { id: u64, title: String, done: bool }
 
-fn todos() -> LinzEndpointGroup {
-    vec![
-        ("get:/todos".into(), Endpoint::new("listTodos")
-            .query::<ListQuery>()
-            .returns(200, JsonBody::new::<Vec<Todo>>())
-            .handler(|req, _| async move {
+fn todos() -> Api {
+    Api::new()
+        .get(
+            "/todos",
+            Endpoint::new("listTodos").query::<ListQuery>().returns(200, JsonBody::new::<Vec<Todo>>()),
+            |req, _| async move {
                 let _ = (req.queries.offset, req.queries.limit);
                 Ok(Vec::new())
-            })),
-        ("post:/todos".into(), Endpoint::new("createTodo")
-            .request_body(JsonBody::new::<TodoInput>())
-            .returns(201, JsonBody::new::<Todo>())
-            .handler(|req, _| async move {
+            },
+        )
+        .post(
+            "/todos",
+            Endpoint::new("createTodo").request_body(JsonBody::new::<TodoInput>()).returns(201, JsonBody::new::<Todo>()),
+            |req, _| async move {
                 let todo = Todo { id: 1, title: req.body.title, done: req.body.done.unwrap_or(false) };
-                Ok(HttpResponse::new(todo)
-                    .header(header::LOCATION, HeaderValue::from_static("/todos/1")))
-            })),
-        ("put:/todos/:id".into(), Endpoint::new("updateTodo")
-            .path::<IdPath>()
-            .request_body(JsonBody::new::<TodoInput>())
-            .returns(200, JsonBody::new::<Todo>())
-            .response(404, true)
-            .handler(|req, _| async move {
+                Ok(HttpResponse::new(todo).header(header::LOCATION, HeaderValue::from_static("/todos/1")))
+            },
+        )
+        .put(
+            "/todos/:id",
+            Endpoint::new("updateTodo")
+                .path::<IdPath>()
+                .request_body(JsonBody::new::<TodoInput>())
+                .returns(200, JsonBody::new::<Todo>())
+                .response(404, true),
+            |req, _| async move {
                 Ok(Todo { id: req.params.id, title: req.body.title, done: req.body.done.unwrap_or(false) })
-            })),
-        ("delete:/todos/:id".into(), Endpoint::new("deleteTodo")
-            .path::<IdPath>()
-            .returns(204, JsonBody::new::<()>())
-            .response(404, true)
-            .handler(|_req, _| async move {
-                Ok(HttpResponse::without_body(StatusCode::NO_CONTENT, None))
-            })),
-    ]
+            },
+        )
+        .delete(
+            "/todos/:id",
+            Endpoint::new("deleteTodo").path::<IdPath>().returns(204, JsonBody::new::<()>()).response(404, true),
+            |_req, _| async move { Ok(()) }, // responds 204, the status passed to `.returns`
+        )
+        .config(GroupConfig::new().tag("Todos"))
 }
 ```
 
@@ -1054,51 +1146,57 @@ struct Upload { file: File, note: Option<String> }
 #[derive(Serialize, JsonSchema)]
 struct Uploaded { name: Option<String>, size: usize }
 
-Endpoint::new("upload")
-    .request_body(FormDataBody::new::<Upload>())
-    .returns(201, JsonBody::new::<Uploaded>())
-    .handler(|req, _| async move {
+Api::new().post(
+    "/uploads",
+    Endpoint::new("upload")
+        .request_body(FormDataBody::new::<Upload>())
+        .returns(201, JsonBody::new::<Uploaded>()),
+    |req, _| async move {
         let file = req.body.file; // name, content_type, data: Bytes
         Ok(Uploaded { name: file.name, size: file.data.len() })
-    })
+    },
+)
 ```
 
 To accept a raw binary body instead, use `.request_body(OctetStreamBody::new())`. Then
-`req.body` is a `File`.
+`req.body` is a `File`. Uploads larger than 2 MiB need a higher `max_body_size`.
 
 ### 13.4 Return a file (download)
 
 ```rust
-Endpoint::new("download")
-    .returns(200, OctetStreamBody::new())
-    .handler(|_, _| async move {
+Api::new().get(
+    "/report",
+    Endpoint::new("download").returns(200, OctetStreamBody::new()),
+    |_, _| async move {
         let data = std::fs::read("report.pdf")
             .map_err(|e| ApiError::detail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         Ok(HttpResponse::new(File::new(data))
             .header(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment; filename=\"report.pdf\"")))
-    })
+    },
+)
 ```
 
 For large payloads, stream the body instead of buffering it. The status still needs a
 declaration, and the stream itself is not validated:
 
 ```rust
-.returns(200, OctetStreamBody::new())
-.handler(|_, _| async move {
+|_, _| async move {
     let file = tokio::fs::File::open("big.bin").await
         .map_err(|e| ApiError::detail(StatusCode::NOT_FOUND, e.to_string()))?;
     let stream = tokio_util::io::ReaderStream::new(file); // tokio-util crate
     Ok(HttpResponse::stream(StatusCode::OK, axum::body::Body::from_stream(stream))
         .header(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")))
-})
+}
 ```
 
 ### 13.5 Respond with text or HTML
 
 ```rust
-Endpoint::new("robots")
-    .returns(200, TextBody::new())
-    .handler(|_, _| async move { Ok("User-agent: *\nDisallow:".to_string()) })
+Api::new().get(
+    "/robots.txt",
+    Endpoint::new("robots").returns(200, TextBody::new()),
+    |_, _| async move { Ok("User-agent: *\nDisallow:".to_string()) },
+)
 ```
 
 ### 13.6 Return different bodies for different statuses
@@ -1114,16 +1212,19 @@ struct Queued { job: String }
 #[serde(untagged)]
 enum Outcome { Done(Done), Queued(Queued) }
 
-Endpoint::new("process")
-    .returns(200, JsonBody::new::<Outcome>())
-    .response(202, JsonBody::new::<Outcome>())
-    .handler(|_, _| async move {
+Api::new().post(
+    "/process",
+    Endpoint::new("process")
+        .returns(200, JsonBody::new::<Outcome>())
+        .response(202, JsonBody::new::<Outcome>()),
+    |_, _| async move {
         if quick() {
-            Ok(HttpResponse::with_status(StatusCode::OK, Outcome::Done(Done { id: 1 })))
+            Ok(HttpResponse::new(Outcome::Done(Done { id: 1 })))
         } else {
             Ok(HttpResponse::with_status(StatusCode::ACCEPTED, Outcome::Queued(Queued { job: "j1".into() })))
         }
-    })
+    },
+)
 ```
 
 The docs show `anyOf [Done, Queued]` for both statuses. If you need each status documented with
@@ -1136,7 +1237,7 @@ use linz_rs::security::In;
 
 let api_key = Security::new(
     "apiKey",
-    SecurityType::ApiKey { name: "x-api-key".into(), r#in: In::Header },
+    SecurityType::ApiKey { name: "X-Api-Key".into(), r#in: In::Header },
     |c: Credentials| async move {
         if c.token.as_deref() == Some("s3cr3t") {
             Ok(http::Extensions::new())
@@ -1146,48 +1247,44 @@ let api_key = Security::new(
     },
 );
 
-let admin = apply_group_config(admin_endpoints(), GroupConfig {
-    security: vec![api_key.apply(Vec::<String>::new())],
-    ..Default::default()
-});
+let admin = admin_api().config(GroupConfig::new().security(&api_key));
 ```
 
 ### 13.8 Version and organize routes
 
 ```rust
-let v1 = merge_endpoint_groups("/v1", vec![users_controller(), todos()])?;
-let v2 = merge_endpoint_groups("/v2", vec![users_v2_controller()])?;
-let all = merge_endpoint_groups("/api", vec![v1, v2])?; // "get:/api/v1/users", ...
+let api = Api::new()
+    .nest("/api/v1", Api::new().merge(users()).merge(todos()))
+    .nest("/api/v2", users_v2()); // "get:/api/v1/users", ..., "get:/api/v2/users", ...
 ```
 
 ### 13.9 Hide internal or deprecate old endpoints
 
 ```rust
-let internal = apply_group_config(internal_endpoints(), GroupConfig { hidden: Some(true), ..Default::default() });
-let legacy = apply_group_config(v1, GroupConfig { deprecated: Some(true), ..Default::default() });
+let api = Api::new()
+    .nest("/internal", internal().config(GroupConfig::new().hidden(true)))
+    .nest("/v1", v1().config(GroupConfig::new().deprecated(true)));
 ```
 
 Hidden endpoints still respond. Protect them with security if they must not be public.
 
 ### 13.10 Share state (database pools, config)
 
-Use `Context<S>` (see [12.3](#123-state)):
+Name the state on the builder (see [12.3](#123-state)):
 
 ```rust
 #[derive(Clone)]
 struct AppState { db: Arc<Database>, config: Arc<Config> }
 
-fn routes() -> LinzEndpointGroup<AppState> {
-    vec![(
-        "get:/users/:id".into(),
-        Endpoint::new("getUser")
-            .path::<IdPath>()
-            .returns(200, JsonBody::new::<User>())
-            .handler(|req, ctx: Context<AppState>| async move {
-                ctx.state.db.find_user(req.params.id).await
-                    .ok_or_else(|| ApiError::detail(StatusCode::NOT_FOUND, "User not found"))
-            }),
-    )]
+fn routes() -> Api<AppState> {
+    Api::<AppState>::new().get(
+        "/users/:id",
+        Endpoint::new("getUser").path::<IdPath>().returns(200, JsonBody::new::<User>()),
+        |req, ctx| async move {
+            ctx.state.db.find_user(req.params.id).await
+                .ok_or_else(|| ApiError::detail(StatusCode::NOT_FOUND, "User not found"))
+        },
+    )
 }
 
 let app = create_api(Router::new(), routes(), config)?.with_state(AppState { db, config: cfg });
@@ -1199,9 +1296,8 @@ let app = create_api(Router::new(), routes(), config)?.with_state(AppState { db,
 use axum::routing::get;
 
 let app = Router::new().route("/metrics", get(metrics)); // add plain routes first
-let app = create_api(app, endpoints, config)?
-    .layer(tower_http::limit::RequestBodyLimitLayer::new(10 * 1024 * 1024)) // tower-http "limit" feature
-    .layer(tower_http::catch_panic::CatchPanicLayer::new());              // tower-http "catch-panic" feature
+let app = create_api(app, api, config)?
+    .layer(tower_http::catch_panic::CatchPanicLayer::new()); // tower-http "catch-panic" feature
 ```
 
 - Add plain routes **before** calling `create_api`. A route on the same path and method as an
@@ -1210,6 +1306,7 @@ let app = create_api(app, endpoints, config)?
   axum ("Cannot merge two `Router`s that both have a fallback"). Use `nest`, or add the routes
   before `create_api`.
 - Prefer the `fallback_handler` option over `Router::fallback` (see [13.12](#1312-custom-handling-of-unmatched-requests)).
+- The request body limit is built in (`max_body_size`). No extra layer is needed for it.
 
 ### 13.12 Custom handling of unmatched requests
 
@@ -1251,7 +1348,7 @@ let config = CreateApiConfig { logger: Some(Arc::new(TracingLogger)), ..Default:
 #[derive(Deserialize, JsonSchema)]
 struct RateLimitHeaders {
     /// Requests left in the current window
-    #[serde(rename = "x-ratelimit-remaining")]
+    #[serde(rename = "X-RateLimit-Remaining")]
     remaining: u32,
 }
 
@@ -1282,8 +1379,8 @@ let mut spec = BuilderConfig::new("My API", "1.0.0");
 spec.additional_schemas = vec![("webhook event".into(), TypeSchema::of::<WebhookEvent>())];
 // -> components.schemas.WebhookEvent
 
-let endpoints = endpoints();
-std::fs::write("openapi.json", serde_json::to_string_pretty(&build_json(&spec, &endpoints)?)?)?;
+let api = api();
+std::fs::write("openapi.json", serde_json::to_string_pretty(&build_json(&spec, api.endpoints())?)?)?;
 ```
 
 ### 13.16 Test endpoints without a server
@@ -1294,7 +1391,7 @@ use http_body_util::BodyExt;
 
 #[tokio::test]
 async fn creates_users() {
-    let app = create_api(axum::Router::new(), endpoints(), Default::default()).unwrap();
+    let app = create_api(axum::Router::new(), users(), Default::default()).unwrap();
 
     let response = app
         .oneshot(
@@ -1312,8 +1409,30 @@ async fn creates_users() {
 }
 ```
 
-For a stateful app, call `.with_state(..)` on the router before `oneshot`. `tests/api.rs` in this
-repository has many more examples.
+For a stateful app, call `.with_state(..)` on the router before `oneshot`. A registration test
+(`create_api(..).unwrap()`) also catches route mistakes, such as mismatched path parameters.
+`tests/api.rs` in this repository has many more examples.
+
+### 13.17 Use `?` with your own error types
+
+```rust
+#[derive(Debug)]
+enum DbError { NotFound, Connection(String) }
+
+impl From<DbError> for ApiError {
+    fn from(err: DbError) -> Self {
+        match err {
+            DbError::NotFound => ApiError::detail(StatusCode::NOT_FOUND, "Not found"),
+            DbError::Connection(_) => ApiError::detail(StatusCode::SERVICE_UNAVAILABLE, "Try again later"),
+        }
+    }
+}
+
+|req, ctx| async move {
+    let user = ctx.state.db.find_user(req.params.id).await?; // Result<User, DbError>
+    Ok(user)
+}
+```
 
 ---
 
@@ -1321,19 +1440,21 @@ repository has many more examples.
 
 For every request that matches an endpoint:
 
-1. **Collect the body** into memory.
+1. **Collect the body** into memory, up to `max_body_size` (otherwise `413`).
 2. **Parse the body** by `Content-Type`. An empty body becomes `null`. An unparsable body
    responds `400`, and an unsupported content type responds `415`.
 3. **Authenticate**: each applied security runs in order. The first failure responds with its
    error. Returned extensions are merged.
 4. **Gather the parameters**: query string, path parameters, headers and cookies are converted
-   to JSON. Repeated keys keep their last value.
+   to JSON. Repeated keys keep their last value, and header names are matched to the DTO's
+   fields case-insensitively.
 5. **Validate** every declared part (body, queries, params, headers, cookies). Textual parts are
    coerced first. Any issue responds `400` with all issues.
 6. **Call the handler** with `Request` and `Context` (including the state). `Err(ApiError)` is
    rendered as is.
-7. **Choose the status** (explicit, or 201 for `post` and 200 otherwise) and find its
-   declaration, falling back to `default`. If there is none, the response is `500`.
+7. **Choose the status** (explicit, then the `.returns` status, then 201 for `post` and 200
+   otherwise) and find its declaration, falling back to `default`. If there is none, the
+   response is `500`.
 8. **Validate the output** against the declared schema. A constraint violation responds `500`.
    Streams skip this step.
 9. **Encode the body** by the declared kind, set `Content-Type`, and apply the handler's
@@ -1352,7 +1473,8 @@ preflight requests are answered by the CORS layer before routing.
   constraints (`range`, `length`, formats) and undeclared statuses are still checked at
   runtime, so cover them with tests.
 - Handlers that only return errors need the success type spelled out: `Err::<User, _>(..)`.
-- Handlers that read `ctx.state` need `ctx: Context<AppState>` (see [12.3](#123-state)).
+- With `Api`, name the state type once (`Api::<AppState>::new()`). With
+  `Endpoint::handler`, annotate `ctx: Context<AppState>` (see [12.3](#123-state)).
 - The status of an `ApiError` does not need to be declared.
 
 **Validation and schemas**
@@ -1369,14 +1491,12 @@ preflight requests are answered by the CORS layer before routing.
 
 **Request handling**
 
-- Bodies are buffered entirely in memory and are **not size-limited**. axum's
-  `DefaultBodyLimit` does not apply because linz-rs reads the raw body. Add
-  `tower_http::limit::RequestBodyLimitLayer`.
+- Bodies are buffered in memory, up to `max_body_size` (2 MiB by default). Raise it for upload
+  endpoints, or set `None` and add your own limit.
 - The body is parsed even for endpoints that declare no body. A non-empty body with an
   unsupported content type responds `415`, as in Linz.
 - Repeated query, form and cookie keys keep only their last value. There is no multi-value
   mode.
-- Header DTO fields must use the lower-case header names.
 - Only `get`, `post`, `put`, `patch` and `delete` endpoints are supported. `HEAD` and `OPTIONS`
   are not routed to endpoints (CORS preflight is handled by the CORS layer).
 - A wrong method on an existing path responds `404`, not `405`.
@@ -1409,15 +1529,18 @@ preflight requests are answered by the CORS layer before routing.
 | Area | Linz | linz-rs |
 | --- | --- | --- |
 | Schemas | Zod | schemars 1.x (`JsonSchema`) plus jsonschema validation (draft 2020-12, formats on) |
-| Endpoint declaration | `endpoint({...})` object | `Endpoint::new(id)` builder, finished by `.handler(f)` |
-| Endpoint groups | object `{ "get:/x": endpoint }` | `Vec<(String, LinzEndpoint<S>)>` |
+| Route declaration | object `{ "get:/x": endpoint({...}) }` | `Api::new().get("/x", Endpoint::new(id)..., handler)`. Linz-style `Vec<(String, LinzEndpoint)>` groups also work. |
 | Response typing | inferred from `responses` | `R` set by `.returns(..)`. Every body response is `SenderBody<R>`. |
+| Default status | 201 for `post`, 200 otherwise | the status passed to `.returns`, then 201/200 |
 | Handler result | the body or an `HttpResponse`; throw `ApiError` | `Result<R or HttpResponse<R>, ApiError>` |
-| Handler context | `{ extensions, req, res, security }` | `Context { state, extensions, request: Parts, security }`. Streaming replaces writing to `res`. |
+| Handler context | `{ extensions, req, res, security }` | `Context { state, extensions, request: Parts, security }`, plus `ctx.extension::<T>()`. Streaming replaces writing to `res`. |
 | State | none (module scope) | the axum router state, as `ctx.state` |
 | Security handler | `(req, scopes, extensions) => Promise<void>` that throws | `Fn(Credentials) -> Future<Result<Extensions, ApiError>>`, with the token extracted for you |
 | Coercion | only with `z.coerce` | automatic for textual inputs, guided by the schema |
+| Header DTO names | lower-case keys | matched case-insensitively |
 | Multi-value query/form options | `multiValueQueryString` (the form options were never applied) | removed; the last occurrence always wins |
+| Body size | unlimited | 2 MiB by default (`413`), configurable |
+| Registration errors | thrown `Error`s | `LinzError` enum; path parameters are checked against the path type |
 | OpenAPI document | `buildJson(...)` passed to `createApi` | built by `create_api` from `DocsConfig::spec`; `build_json` remains for exports |
 | Path params | `:name` | `:name` or `{name}` |
 | Method mismatch | 404 | 404 (same) |
@@ -1445,8 +1568,10 @@ preflight requests are answered by the CORS layer before routing.
 | 400 | `{"errors":[{"detail":"Unknown encoding: <charset>"}]}` | Unsupported charset |
 | 401 | `{"errors":[{"detail":"Missing authorization header"}]}` | See [9.2](#92-token-extraction) for all messages |
 | 404 | `{"errors":[{"detail":"Cannot find <METHOD> <path>"}]}` | No route (or wrong method) |
+| 413 | `{"errors":[{"detail":"Request body exceeds the limit of <N> bytes"}]}` | Body larger than `max_body_size` |
 | 415 | `{"errors":[{"detail":"'<type>' content type is not supported"}]}` | Unsupported request content type |
 | 500 | `{"errors":[{"detail":"Internal server error"}]}` | Undeclared response status, or invalid output |
+| 500 | `{"errors":[{"detail":"Missing request extension `<type>`"}]}` | `ctx.extension::<T>()` found nothing |
 | 500 | `{"errors":[{"detail":"<message>"}]}` | Internal failure (for example, reading the body) |
 
 ### 17.2 Logged messages
@@ -1461,13 +1586,14 @@ preflight requests are answered by the CORS layer before routing.
 
 ### 17.3 Registration errors
 
-`create_api`, `build_json` and `merge_endpoint_groups` return `Err(String)` with these messages:
-
-| Message | Cause |
-| --- | --- |
-| `'<key>' is not a valid `method:path` key` | The key has no `:` |
-| `Invalid method "<m>" for path <p>` | The method is not one of get/post/put/patch/delete |
-| `'<path>' is not a valid path` | The path does not start with `/`, or contains `?` or `#` |
-| `Duplicate operation ID "<id>" for path <p>` | Two endpoints share an operation ID (`create_api`) |
-| `Duplicate route <METHOD> <path>` | Two endpoints, or an endpoint and a docs route, share a method and path (`create_api`) |
-| `Duplicated keys occured: <keys>` | Merging produced duplicate keys (`merge_endpoint_groups`) |
+| `LinzError` variant | Message | Raised by |
+| --- | --- | --- |
+| `InvalidKey` | `'<key>' is not a valid `method:path` key` | all |
+| `InvalidMethod` | `Invalid method "<m>" for path <p>` | all |
+| `InvalidPath` | `'<path>' is not a valid path` | all |
+| `DuplicateOperationId` | `Duplicate operation ID "<id>" for path <p>` | `create_api` |
+| `DuplicateRoute` | `Duplicate route <METHOD> <path>` (also for clashes with the docs routes) | `create_api` |
+| `UndeclaredPathParameter` | `Path parameter "<p>" of <path> (<opId>) is not declared in its path type (declared: <fields>)` | `create_api` |
+| `MissingPathParameter` | `The path type of <path> (<opId>) requires "<field>", which is not a parameter of the path` | `create_api` |
+| `DuplicateKeys` | `Duplicated keys occured: <keys>` | `merge_endpoint_groups` |
+| `Spec` | `Cannot build the OpenAPI document: <message>` | `create_api`, `build_json` |

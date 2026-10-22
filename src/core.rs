@@ -560,6 +560,9 @@ pub struct EndpointMeta {
     pub request_body: Option<BodyDescriptor>,
     pub responses: BTreeMap<u16, ResponseSpec>,
     pub default_response: Option<BodyDescriptor>,
+    /// The status used when the handler does not set one, set by [`Endpoint::returns`].
+    /// Without it, `201` is used for `post` endpoints and `200` otherwise.
+    pub default_status: Option<u16>,
 }
 
 /// A validated incoming request passed to the endpoint handler.
@@ -583,6 +586,47 @@ pub struct Context<S = ()> {
     pub extensions: Extensions,
     /// The raw request head.
     pub request: http::request::Parts,
+}
+
+impl<S> Context<S> {
+    /// Returns an object attached by a security handler, or a `500` error when it is missing,
+    /// e.g. `let user = ctx.extension::<CurrentUser>()?;`.
+    #[allow(clippy::result_large_err)]
+    pub fn extension<T: Send + Sync + 'static>(&self) -> Result<&T, ApiError> {
+        self.extensions.get::<T>().ok_or_else(|| {
+            ApiError::detail(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Missing request extension `{}`", std::any::type_name::<T>()),
+            )
+        })
+    }
+}
+
+/// Converts a tag name or an OpenAPI tag object into a tag.
+pub trait IntoTag {
+    fn into_tag(self) -> spec::Tag;
+}
+
+impl IntoTag for spec::Tag {
+    fn into_tag(self) -> spec::Tag {
+        self
+    }
+}
+
+impl IntoTag for &str {
+    fn into_tag(self) -> spec::Tag {
+        self.to_string().into_tag()
+    }
+}
+
+impl IntoTag for String {
+    fn into_tag(self) -> spec::Tag {
+        spec::Tag {
+            name: self,
+            description: None,
+            extensions: Default::default(),
+        }
+    }
 }
 
 /// The payload of an [`HttpResponse`].
@@ -659,6 +703,29 @@ impl<T> From<T> for HttpResponse<T> {
     }
 }
 
+/// The success value of a handler of an endpoint whose response type is `R`: either `R`
+/// itself or an [`HttpResponse<R>`].
+#[diagnostic::on_unimplemented(
+    message = "the handler returns `{Self}`, but the endpoint's response type is `{R}`",
+    label = "expected `{R}` or `HttpResponse<{R}>`",
+    note = "the response type is set by `.returns(status, body)`"
+)]
+pub trait IntoHttpResponse<R> {
+    fn into_http_response(self) -> HttpResponse<R>;
+}
+
+impl<R> IntoHttpResponse<R> for R {
+    fn into_http_response(self) -> HttpResponse<R> {
+        HttpResponse::new(self)
+    }
+}
+
+impl<R> IntoHttpResponse<R> for HttpResponse<R> {
+    fn into_http_response(self) -> HttpResponse<R> {
+        self
+    }
+}
+
 type SerializeFn = Box<dyn FnOnce(bool) -> Result<(Value, FileStore), String> + Send>;
 
 pub(crate) enum ErasedBody {
@@ -706,6 +773,8 @@ pub(crate) struct RawPart {
     pub files: FileStore,
     /// Whether string values may be coerced to the types of the schema.
     pub coerce: bool,
+    /// Whether object keys match the schema's property names case-insensitively.
+    pub case_insensitive: bool,
 }
 
 impl RawPart {
@@ -714,7 +783,13 @@ impl RawPart {
             value,
             files: FileStore::default(),
             coerce: true,
+            case_insensitive: false,
         }
+    }
+
+    pub fn case_insensitive(mut self) -> Self {
+        self.case_insensitive = true;
+        self
     }
 }
 
@@ -804,13 +879,14 @@ impl<Q, H, P, C, B, R> Endpoint<Q, H, P, C, B, R> {
         }
     }
 
-    pub fn tag(mut self, tag: spec::Tag) -> Self {
-        self.meta.tags.push(tag);
+    /// Adds a tag, given by name (`"Users"`) or as an [`oas::Tag`](spec::Tag) object.
+    pub fn tag(mut self, tag: impl IntoTag) -> Self {
+        self.meta.tags.push(tag.into_tag());
         self
     }
 
-    pub fn tags(mut self, tags: impl IntoIterator<Item = spec::Tag>) -> Self {
-        self.meta.tags.extend(tags);
+    pub fn tags(mut self, tags: impl IntoIterator<Item = impl IntoTag>) -> Self {
+        self.meta.tags.extend(tags.into_iter().map(IntoTag::into_tag));
         self
     }
 
@@ -835,8 +911,9 @@ impl<Q, H, P, C, B, R> Endpoint<Q, H, P, C, B, R> {
         self
     }
 
-    pub fn security(mut self, security: AppliedSecurity) -> Self {
-        self.meta.security.push(security);
+    /// Adds an authentication step: `scheme.apply([..scopes])`, or `&scheme` for no scopes.
+    pub fn security(mut self, security: impl Into<AppliedSecurity>) -> Self {
+        self.meta.security.push(security.into());
         self
     }
 
@@ -882,6 +959,7 @@ impl<Q, H, P, C, B, R> Endpoint<Q, H, P, C, B, R> {
 impl<Q, H, P, C, B> Endpoint<Q, H, P, C, B, NoResponse> {
     /// Declares the main response and sets the response type of the handler to `T`.
     /// Further body responses declared with [`Endpoint::response`] must also be of type `T`.
+    /// `status` is used when the handler does not set one.
     ///
     /// ```
     /// use linz_rs::*;
@@ -928,6 +1006,7 @@ impl<Q, H, P, C, B> Endpoint<Q, H, P, C, B, NoResponse> {
     /// ```
     pub fn returns<T>(mut self, status: u16, body: SenderBody<T>) -> Endpoint<Q, H, P, C, B, T> {
         self.meta.responses.insert(status, ResponseSpec::Body(body.descriptor));
+        self.meta.default_status = Some(status);
         self.retype()
     }
 
@@ -975,7 +1054,7 @@ where
     pub fn handler<S, O, F, Fut>(self, handler: F) -> LinzEndpoint<S>
     where
         S: Send + 'static,
-        O: Into<HttpResponse<R>>,
+        O: IntoHttpResponse<R>,
         F: Fn(Request<Q, H, P, C, B>, Context<S>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<O, ApiError>> + Send + 'static,
     {
@@ -1007,7 +1086,7 @@ where
             Box::pin(async move {
                 handler(request, ctx)
                     .await
-                    .map(|output| output.into().erase())
+                    .map(|output| output.into_http_response().erase())
                     .map_err(HandlerError::Api)
             })
         });
@@ -1015,6 +1094,24 @@ where
         LinzEndpoint {
             meta: self.meta,
             handler: erased,
+        }
+    }
+}
+
+/// Renames the keys of an object to the property names of the schema they match
+/// case-insensitively, e.g. `x-api-key` to `X-Api-Key`.
+fn rename_keys_like_schema(value: &mut Value, root: &Value) {
+    let (Value::Object(map), Some(shape)) = (value, schema::object_shape(root)) else {
+        return;
+    };
+
+    for property in shape.properties {
+        if map.contains_key(&property) {
+            continue;
+        }
+        let key = map.keys().find(|k| k.eq_ignore_ascii_case(&property)).cloned();
+        if let Some(item) = key.and_then(|key| map.shift_remove(&key)) {
+            map.insert(property, item);
         }
     }
 }
@@ -1033,8 +1130,13 @@ fn decode_part<T: DataTransferObject>(
         mut value,
         files,
         coerce,
+        case_insensitive,
     } = part;
     let compiled = schema::compiled::<T>();
+
+    if case_insensitive {
+        rename_keys_like_schema(&mut value, &compiled.root);
+    }
 
     if coerce {
         schema::coerce(&mut value, &compiled.root);

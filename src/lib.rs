@@ -5,6 +5,7 @@
 //! [`build_json`].
 
 pub mod adapter;
+pub mod api;
 pub mod core;
 pub mod err;
 pub mod grouping;
@@ -22,7 +23,9 @@ pub use crate::adapter::{
     DocsViewer,
     FallbackHandler,
     Logger,
+    DEFAULT_MAX_BODY_SIZE,
 };
+pub use crate::api::Api;
 pub use crate::core::{
     BodyKind,
     Context,
@@ -34,7 +37,9 @@ pub use crate::core::{
     HtmlBody,
     HttpMethod,
     HttpResponse,
+    IntoHttpResponse,
     IntoResponseSpec,
+    IntoTag,
     JsonBody,
     LinzEndpoint,
     LinzEndpointGroup,
@@ -54,6 +59,7 @@ pub use crate::err::{
     ApiError,
     JsonApiErrorItem,
     JsonApiErrorResponse,
+    LinzError,
 };
 pub use crate::grouping::{
     apply_group_config,
