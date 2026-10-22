@@ -9,7 +9,7 @@ repository = "https://github.com/apskhem/linz-rs"
 readme = "README.md"
 keywords = ["openapi", "axum", "web", "validation", "json-schema"]
 categories = ["web-programming::http-server", "api-bindings"]
-include = ["src/**/*", "examples/**/*", "tests/**/*", "README.md", "MANUAL.md", "CHANGELOG.md", "LICENSE-*"]
+include = ["src/**/*", "examples/**/*", "tests/**/*", "benches/**/*", "README.md", "MANUAL.md", "CHANGELOG.md", "LICENSE-*"]
 
 [dependencies]
 axum = { version = "0.8.9", default-features = false, features = [] }
@@ -29,6 +29,7 @@ url = "2.5.8"
 
 [dev-dependencies]
 axum = { version = "0.8.9", features = ["tokio", "http1"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal"] }
 tower = { version = "0.5.3", features = ["util"] }
 
@@ -36,3 +37,7 @@ tower = { version = "0.5.3", features = ["util"] }
 name = "bootstrap"
 # Run the example's tests with `cargo test`, too.
 test = true
+
+[[bench]]
+name = "api"
+harness = false

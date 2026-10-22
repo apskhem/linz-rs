@@ -70,6 +70,11 @@ $ tests/hurl/run.sh                                        # run the Hurl end-to
 The [Hurl](https://hurl.dev) suites in `tests/hurl/` start the example server and test the library
 over real HTTP: validation errors, coercion, content types, auth, uploads, CORS and the docs.
 
+The [Criterion](https://github.com/criterion-rs/criterion.rs) benchmarks in `benches/` measure
+request handling per body type, the overhead over a plain axum handler, OpenAPI document
+building and route registration. Run them with `cargo bench`, or a subset with e.g.
+`cargo bench -- request/`; reports are written to `target/criterion/`.
+
 ## Behavior
 
 - Request parts (body, queries, params, headers, cookies) are validated against the JSON

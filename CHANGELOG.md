@@ -12,6 +12,8 @@ minor releases (0.x.0) may contain breaking changes.
 
 - End-to-end tests with [Hurl](https://hurl.dev) in `tests/hurl/`, run against the bootstrap
   example by `tests/hurl/run.sh` and in CI.
+- Criterion benchmarks in `benches/` for request handling, the overhead over plain axum,
+  OpenAPI document building and route registration (`cargo bench`).
 
 ### Changed
 
