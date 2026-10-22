@@ -8,6 +8,7 @@ use axum::body::Body;
 use axum::extract::{
     FromRequestParts,
     RawPathParams,
+    State,
 };
 use axum::response::Response;
 use axum::routing::{
@@ -44,6 +45,10 @@ use crate::internal::{
     body,
     utils,
 };
+use crate::json_builder::{
+    build_json,
+    BuilderConfig,
+};
 
 /// A logger with the levels of RFC 5424. Every method is a no-op by default.
 pub trait Logger: Send + Sync {
@@ -63,20 +68,6 @@ pub trait Logger: Send + Sync {
     fn info(&self, _message: &str) {}
     /// Level 7
     fn debug(&self, _message: &str) {}
-}
-
-/// Configurations for incoming requests.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct RequestConfig {
-    /// Enables parsing multiple values for a query string.
-    /// If `false`, only the last value is used.
-    pub multi_value_query_string: bool,
-    /// Enables parsing multiple values for `multipart/form-data`.
-    /// If `false`, only the last value is used.
-    pub multi_value_form_data: bool,
-    /// Enables parsing multiple values for `application/x-www-form-urlencoded`.
-    /// If `false`, only the last value is used.
-    pub multi_value_url_encoded: bool,
 }
 
 /// CORS configurations.
@@ -137,8 +128,9 @@ impl DocsViewer {
 pub struct DocsConfig {
     /// The documents viewer.
     pub viewer: DocsViewer,
-    /// The OpenAPI spec, e.g. built by [`crate::json_builder::build_json`].
-    pub spec: Value,
+    /// The configuration of the OpenAPI document, which is built from the endpoints
+    /// passed to [`create_api`].
+    pub spec: BuilderConfig,
     /// The path for users to view the docs. The docs will render to the set `viewer`.
     pub docs_path: String,
     /// The path to get the OpenAPI spec file in JSON.
@@ -156,14 +148,11 @@ pub struct CreateApiConfig {
     pub cors: Option<CorsConfig>,
     /// Configurations related to OpenAPI documents.
     pub docs: Option<DocsConfig>,
-    /// Incoming requests configurations. Applies to all endpoints.
-    pub request: RequestConfig,
     pub logger: Option<Arc<dyn Logger>>,
     pub fallback_handler: Option<FallbackHandler>,
 }
 
 struct Shared {
-    request: RequestConfig,
     logger: Option<Arc<dyn Logger>>,
 }
 
@@ -184,13 +173,25 @@ impl Shared {
 /// Registers the endpoints (and optionally the docs, CORS and fallback) to the router.
 ///
 /// Keys of `endpoints` are `method:path`, e.g. `get:/users/:id`. Path parameters can be
-/// written as `:name` or `{name}`.
-pub fn create_api<S>(app: Router<S>, endpoints: LinzEndpointGroup, config: CreateApiConfig) -> Result<Router<S>, String>
+/// written as `:name` or `{name}`. When [`CreateApiConfig::docs`] is set, the OpenAPI
+/// document is built from `endpoints`.
+///
+/// `S` is the state of the router, available to handlers as [`Context::state`].
+pub fn create_api<S>(
+    app: Router<S>,
+    endpoints: LinzEndpointGroup<S>,
+    config: CreateApiConfig,
+) -> Result<Router<S>, String>
 where
     S: Clone + Send + Sync + 'static,
 {
+    let spec = config
+        .docs
+        .as_ref()
+        .map(|docs| build_json(&docs.spec, &endpoints))
+        .transpose()?;
+
     let shared = Arc::new(Shared {
-        request: config.request,
         logger: config.logger.clone(),
     });
 
@@ -230,10 +231,10 @@ where
 
         let endpoint = Arc::new(endpoint);
         let shared = shared.clone();
-        let handler = move |req: axum::extract::Request| {
+        let handler = move |State(state): State<S>, req: axum::extract::Request| {
             let endpoint = endpoint.clone();
             let shared = shared.clone();
-            async move { handle(&endpoint, method, &shared, req).await }
+            async move { handle(&endpoint, method, &shared, state, req).await }
         };
 
         add_route(
@@ -244,9 +245,9 @@ where
     }
 
     // docs config
-    if let Some(docs) = &config.docs {
-        let spec_json = serde_json::to_string(&docs.spec).map_err(|e| e.to_string())?;
-        let title = docs.spec["info"]["title"].as_str().unwrap_or_default();
+    if let (Some(docs), Some(spec)) = (&config.docs, &spec) {
+        let spec_json = serde_json::to_string(spec).map_err(|e| e.to_string())?;
+        let title = &docs.spec.info.title;
         let html = docs
             .viewer
             .template()
@@ -314,17 +315,24 @@ enum Failure {
     Internal(String),
 }
 
-async fn handle(endpoint: &LinzEndpoint, method: HttpMethod, shared: &Shared, req: axum::extract::Request) -> Response {
-    match process(endpoint, method, shared, req).await {
+async fn handle<S>(
+    endpoint: &LinzEndpoint<S>,
+    method: HttpMethod,
+    shared: &Shared,
+    state: S,
+    req: axum::extract::Request,
+) -> Response {
+    match process(endpoint, method, shared, state, req).await {
         Ok(response) => response,
         Err(failure) => failure_response(failure, shared),
     }
 }
 
-async fn process(
-    endpoint: &LinzEndpoint,
+async fn process<S>(
+    endpoint: &LinzEndpoint<S>,
     method: HttpMethod,
     shared: &Shared,
+    state: S,
     req: axum::extract::Request,
 ) -> Result<Response, Failure> {
     let meta = endpoint.meta();
@@ -350,7 +358,7 @@ async fn process(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    let body = body::parse_body(&body, content_type, &shared.request).map_err(Failure::BodyParser)?;
+    let body = body::parse_body(&body, content_type).map_err(Failure::BodyParser)?;
 
     // process auth (if has) sequentially
     let mut extensions = Extensions::new();
@@ -358,7 +366,7 @@ async fn process(
         extensions.extend(applied.authenticate(&parts).await.map_err(Failure::Api)?);
     }
 
-    let queries = utils::query_to_json(parts.uri.query(), shared.request.multi_value_query_string);
+    let queries = utils::query_to_json(parts.uri.query());
     let cookies = utils::cookies_to_json(
         parts
             .headers
@@ -391,6 +399,7 @@ async fn process(
         cookies: RawPart::textual(cookies),
     };
     let ctx = Context {
+        state,
         security: meta.security.clone(),
         extensions,
         request: parts,

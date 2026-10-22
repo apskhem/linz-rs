@@ -36,6 +36,8 @@ struct EchoPathResult {
 #[derive(Deserialize, JsonSchema)]
 struct EchoBody {
     echo: Option<String>,
+    #[allow(dead_code)]
+    coords: Option<(f64, f64)>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -45,7 +47,7 @@ struct BodyResult {
 
 #[derive(Deserialize, JsonSchema)]
 struct EchoQuery {
-    echo: (String,),
+    echo: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -95,6 +97,29 @@ struct ClientHeader {
 #[derive(Clone)]
 struct UserId(String);
 
+#[derive(Serialize, JsonSchema)]
+struct Bounded {
+    #[schemars(range(max = 10))]
+    n: u32,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct Subscribe {
+    #[schemars(email)]
+    #[allow(dead_code)]
+    email: String,
+}
+
+#[derive(Clone)]
+struct AppState {
+    greeting: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct Greeting {
+    message: String,
+}
+
 fn bearer() -> Security {
     Security::new(
         "bearerAuth",
@@ -123,21 +148,20 @@ fn endpoints() -> LinzEndpointGroup {
             "post:/echo/:path".into(),
             Endpoint::new("echoPathSimple")
                 .path::<EchoPath>()
-                .response(201, JsonBody::new::<EchoPathResult>())
+                .returns(201, JsonBody::new::<EchoPathResult>())
                 .response(404, true)
-                .handler(|req, _| async move { Ok(EchoPathResult { path: req.params.path }.into()) }),
+                .handler(|req, _| async move { Ok(EchoPathResult { path: req.params.path }) }),
         ),
         (
             "post:/echo/simple/body".into(),
             Endpoint::new("echoBodySimple")
                 .request_body(JsonBody::new::<EchoBody>())
-                .response(201, JsonBody::new::<BodyResult>())
+                .returns(201, JsonBody::new::<BodyResult>())
                 .handler(|req, _| {
                     async move {
                         Ok(BodyResult {
                             body: req.body.echo.unwrap_or_else(|| "null!".into()),
-                        }
-                        .into())
+                        })
                     }
                 }),
         ),
@@ -145,26 +169,24 @@ fn endpoints() -> LinzEndpointGroup {
             "post:/echo/simple/query".into(),
             Endpoint::new("echoBodyQuery")
                 .query::<EchoQuery>()
-                .response(201, JsonBody::new::<BodyResult>())
-                .handler(|req, _| async move { Ok(BodyResult { body: req.queries.echo.0 }.into()) }),
+                .returns(201, JsonBody::new::<BodyResult>())
+                .handler(|req, _| async move { Ok(BodyResult { body: req.queries.echo }) }),
         ),
         (
             "post:/echo/simple/void".into(),
             Endpoint::new("echoVoidSimple")
                 .request_body(JsonBody::new::<EchoBody>().describe("Echo void result"))
-                .response(201, JsonBody::new::<()>())
-                .handler(|_, _| async move { Ok(().into()) }),
+                .returns(201, JsonBody::new::<()>())
+                .handler(|_, _| async move { Ok(()) }),
         ),
         (
             "post:/echo/simple/error".into(),
             Endpoint::new("echoError")
-                .response(201, JsonBody::new::<BodyResult>())
+                .returns(201, JsonBody::new::<BodyResult>())
                 .response(404, true)
-                .handler(|_, _| {
-                    async move {
-                        Err::<HttpResponse<BodyResult>, _>(ApiError::detail(StatusCode::NOT_FOUND, "Not Found"))
-                    }
-                }),
+                .handler(
+                    |_, _| async move { Err::<BodyResult, _>(ApiError::detail(StatusCode::NOT_FOUND, "Not Found")) },
+                ),
         ),
         (
             "post:/echo/simple/upload".into(),
@@ -172,15 +194,14 @@ fn endpoints() -> LinzEndpointGroup {
                 .request_body(
                     FormDataBody::new::<Upload>().encoding("file", EncodingItem::new().content_type(["image/png"])),
                 )
-                .response(201, JsonBody::new::<UploadResult>())
+                .returns(201, JsonBody::new::<UploadResult>())
                 .handler(|req, _| {
                     async move {
                         Ok(UploadResult {
                             field: req.body.field,
                             filename: req.body.file.name,
                             size: req.body.file.data.len(),
-                        }
-                        .into())
+                        })
                     }
                 }),
         ),
@@ -189,15 +210,14 @@ fn endpoints() -> LinzEndpointGroup {
             Endpoint::new("updateUser")
                 .path::<UserPath>()
                 .request_body(UrlEncodedBody::new::<User>())
-                .response(200, JsonBody::new::<UserResult>())
+                .returns(200, JsonBody::new::<UserResult>())
                 .handler(|req, _| {
                     async move {
                         Ok(UserResult {
                             id: req.params.user_id,
                             username: req.body.username,
                             age: req.body.age,
-                        }
-                        .into())
+                        })
                     }
                 }),
         ),
@@ -207,7 +227,7 @@ fn endpoints() -> LinzEndpointGroup {
                 .security(bearer().apply(["read"]))
                 .cookie::<Session>()
                 .header::<ClientHeader>()
-                .response(200, JsonBody::new::<Value>())
+                .returns(200, JsonBody::new::<Value>())
                 .handler(|req, ctx| {
                     async move {
                         let user = ctx.extensions.get::<UserId>().unwrap().0.clone();
@@ -216,31 +236,32 @@ fn endpoints() -> LinzEndpointGroup {
                             "session": req.cookies.session,
                             "client": req.headers.client,
                             "scopes": ctx.security[0].scopes,
-                        })
-                        .into())
+                        }))
                     }
                 }),
         ),
         (
             "get:/broken".into(),
             Endpoint::new("broken")
-                .response(200, JsonBody::new::<UserResult>())
-                .handler(|_, _| async move { Ok(json!({ "id": "not a number" }).into()) }),
+                .returns(200, JsonBody::new::<Bounded>())
+                .handler(|_, _| async move { Ok(Bounded { n: 50 }) }),
         ),
         (
             "get:/undeclared".into(),
             Endpoint::new("undeclared")
-                .response(200, JsonBody::new::<Value>())
+                .returns(200, JsonBody::new::<Value>())
                 .handler(|_, _| async move { Ok(HttpResponse::with_status(StatusCode::ACCEPTED, json!({}))) }),
         ),
         (
             "get:/teapot".into(),
             Endpoint::new("teapot")
-                .default_response(TextBody::new())
+                .returns_default(TextBody::new())
                 .handler(|_, _| {
                     async move {
-                        Ok(HttpResponse::with_status(StatusCode::IM_A_TEAPOT, "short and stout".to_string())
-                            .header(header::CACHE_CONTROL, "no-store".parse().unwrap()))
+                        Ok(
+                            HttpResponse::with_status(StatusCode::IM_A_TEAPOT, "short and stout".to_string())
+                                .header(header::CACHE_CONTROL, "no-store".parse().unwrap()),
+                        )
                     }
                 }),
         ),
@@ -248,12 +269,12 @@ fn endpoints() -> LinzEndpointGroup {
             "post:/binary".into(),
             Endpoint::new("binary")
                 .request_body(OctetStreamBody::new())
-                .response(201, OctetStreamBody::new())
+                .returns(201, OctetStreamBody::new())
                 .handler(|req, _| {
                     async move {
                         let mut data = req.body.data.to_vec();
                         data.reverse();
-                        Ok(File::new(data).into())
+                        Ok(File::new(data))
                     }
                 }),
         ),
@@ -261,32 +282,28 @@ fn endpoints() -> LinzEndpointGroup {
             "get:/hidden".into(),
             Endpoint::new("hidden")
                 .hidden(true)
-                .response(200, TextBody::new())
-                .handler(|_, _| async move { Ok("hidden".to_string().into()) }),
+                .returns(200, TextBody::new())
+                .handler(|_, _| async move { Ok("hidden".to_string()) }),
+        ),
+        (
+            "post:/subscribe".into(),
+            Endpoint::new("subscribe")
+                .request_body(JsonBody::new::<Subscribe>())
+                .returns(204, JsonBody::new::<()>())
+                .handler(|_, _| async move { Ok(HttpResponse::without_body(StatusCode::NO_CONTENT, None)) }),
         ),
     ]
 }
 
-fn spec() -> Value {
-    let endpoints = endpoints();
-    let mut config = BuilderConfig::new(
-        oas::Info {
-            title: "Linz Test API".into(),
-            version: "1.0.0".into(),
-            summary: None,
-            description: None,
-            terms_of_service: None,
-            contact: None,
-            license: None,
-            extensions: Default::default(),
-        },
-        &endpoints,
-    );
-    config.servers = vec![];
-    build_json(&config).unwrap()
+fn spec_config() -> BuilderConfig {
+    BuilderConfig::new("Linz Test API", "1.0.0")
 }
 
-fn app(request: RequestConfig) -> Router {
+fn spec() -> Value {
+    build_json(&spec_config(), &endpoints()).unwrap()
+}
+
+fn app() -> Router {
     create_api(
         Router::new(),
         endpoints(),
@@ -294,12 +311,11 @@ fn app(request: RequestConfig) -> Router {
             cors: Some(CorsConfig::Permissive),
             docs: Some(DocsConfig {
                 viewer: DocsViewer::Scalar,
-                spec: spec(),
+                spec: spec_config(),
                 docs_path: "/docs".into(),
                 spec_path: "/openapi.json".into(),
                 theme: None,
             }),
-            request,
             ..Default::default()
         },
     )
@@ -333,42 +349,30 @@ fn post_json(uri: &str, body: Value) -> Request<Body> {
 
 #[tokio::test]
 async fn echoes_path_params() {
-    let (status, body) = send_json(app(Default::default()), post_json("/echo/hello", json!({}))).await;
+    let (status, body) = send_json(app(), post_json("/echo/hello", json!({}))).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body, json!({ "path": "hello" }));
 }
 
 #[tokio::test]
 async fn echoes_json_bodies() {
-    let (status, body) = send_json(
-        app(Default::default()),
-        post_json("/echo/simple/body", json!({ "echo": "hi" })),
-    )
-    .await;
+    let (status, body) = send_json(app(), post_json("/echo/simple/body", json!({ "echo": "hi" }))).await;
     assert_eq!((status, body), (StatusCode::CREATED, json!({ "body": "hi" })));
 
-    let (status, body) = send_json(
-        app(Default::default()),
-        post_json("/echo/simple/body", json!({ "echo": null })),
-    )
-    .await;
+    let (status, body) = send_json(app(), post_json("/echo/simple/body", json!({ "echo": null }))).await;
     assert_eq!((status, body), (StatusCode::CREATED, json!({ "body": "null!" })));
 }
 
 #[tokio::test]
 async fn rejects_invalid_payloads() {
-    let (status, body) = send_json(
-        app(Default::default()),
-        post_json("/echo/simple/body", json!({ "echo": 1 })),
-    )
-    .await;
+    let (status, body) = send_json(app(), post_json("/echo/simple/body", json!({ "echo": 1 }))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["errors"][0]["meta"]["in"], "body");
     assert_eq!(body["errors"][0]["meta"]["result"][0]["path"], json!(["echo"]));
 
     // missing body
     let req = Request::post("/echo/simple/body").body(Body::empty()).unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["errors"][0]["meta"]["in"], "body");
 
@@ -377,7 +381,7 @@ async fn rejects_invalid_payloads() {
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from("{"))
         .unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(body["errors"][0]["detail"].is_string());
 
@@ -386,38 +390,67 @@ async fn rejects_invalid_payloads() {
         .header(header::CONTENT_TYPE, "text/csv")
         .body(Body::from("a,b"))
         .unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
     assert_eq!(body["errors"][0]["detail"], "'text/csv' content type is not supported");
 }
 
 #[tokio::test]
-async fn parses_multi_value_queries() {
-    let req = Request::post("/echo/simple/query?echo=a").body(Body::empty()).unwrap();
-    let (status, body) = send_json(
-        app(RequestConfig {
-            multi_value_query_string: true,
-            ..Default::default()
-        }),
-        req,
-    )
-    .await;
-    assert_eq!((status, body), (StatusCode::CREATED, json!({ "body": "a" })));
+async fn uses_last_occurrence_of_repeated_values() {
+    let req = Request::post("/echo/simple/query?echo=a&echo=b")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body) = send_json(app(), req).await;
+    assert_eq!((status, body), (StatusCode::CREATED, json!({ "body": "b" })));
 
-    // a tuple does not accept a single value
-    let req = Request::post("/echo/simple/query?echo=a").body(Body::empty()).unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let req = Request::put("/users/1")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("username=alice&age=20&username=bobby"))
+        .unwrap();
+    let (status, body) = send_json(app(), req).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["username"], "bobby");
+}
+
+#[tokio::test]
+async fn validates_formats() {
+    let (status, body) = send_json(app(), post_json("/subscribe", json!({ "email": "not-an-email" }))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["errors"][0]["meta"]["in"], "queries");
+    assert_eq!(body["errors"][0]["meta"]["result"][0]["path"], json!(["email"]));
+
+    let (status, _, body) = send(app(), post_json("/subscribe", json!({ "email": "a@example.com" }))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn passes_state_to_handlers() {
+    let endpoints: LinzEndpointGroup<AppState> = vec![(
+        "get:/greet/:path".into(),
+        Endpoint::new("greet")
+            .path::<EchoPath>()
+            .returns(200, JsonBody::new::<Greeting>())
+            .handler(|req, ctx: Context<AppState>| {
+                async move {
+                    Ok(Greeting {
+                        message: format!("{}, {}", ctx.state.greeting, req.params.path),
+                    })
+                }
+            }),
+    )];
+    let app = create_api(Router::new(), endpoints, Default::default())
+        .unwrap()
+        .with_state(AppState {
+            greeting: "hello".into(),
+        });
+
+    let (status, body) = send_json(app, Request::get("/greet/world").body(Body::empty()).unwrap()).await;
+    assert_eq!((status, body), (StatusCode::OK, json!({ "message": "hello, world" })));
 }
 
 #[tokio::test]
 async fn responds_without_body_for_void() {
-    let (status, headers, body) = send(
-        app(Default::default()),
-        post_json("/echo/simple/void", json!({ "echo": "x" })),
-    )
-    .await;
+    let (status, headers, body) = send(app(), post_json("/echo/simple/void", json!({ "echo": "x" }))).await;
     assert_eq!(status, StatusCode::CREATED);
     assert!(body.is_empty());
     assert!(headers.get(header::CONTENT_TYPE).is_none());
@@ -426,7 +459,7 @@ async fn responds_without_body_for_void() {
 #[tokio::test]
 async fn renders_api_errors() {
     let req = Request::post("/echo/simple/error").body(Body::empty()).unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, json!({ "errors": [{ "detail": "Not Found" }] }));
 }
@@ -446,7 +479,7 @@ async fn accepts_multipart_uploads() {
         )
         .body(Body::from(body))
         .unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(body, json!({ "field": "value", "filename": "a.png", "size": 3 }));
 
@@ -459,7 +492,7 @@ async fn accepts_multipart_uploads() {
         )
         .body(Body::from(body))
         .unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["errors"][0]["meta"]["in"], "body");
 }
@@ -470,7 +503,7 @@ async fn coerces_textual_inputs() {
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(Body::from("username=alice&age=30"))
         .unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({ "id": 42, "username": "alice", "age": 30 }));
 
@@ -478,7 +511,7 @@ async fn coerces_textual_inputs() {
         .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
         .body(Body::from("username=al&age=12"))
         .unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let locations: Vec<&str> = body["errors"]
         .as_array()
@@ -493,7 +526,7 @@ async fn coerces_textual_inputs() {
 #[tokio::test]
 async fn authenticates_with_security() {
     let req = Request::get("/me").body(Body::empty()).unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(
         body,
@@ -504,7 +537,7 @@ async fn authenticates_with_security() {
         .header(header::AUTHORIZATION, "Bearer wrong")
         .body(Body::empty())
         .unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body, json!({ "errors": [{ "detail": "Invalid token" }] }));
 
@@ -514,7 +547,7 @@ async fn authenticates_with_security() {
         .header("x-client", "test")
         .body(Body::empty())
         .unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body,
@@ -525,12 +558,12 @@ async fn authenticates_with_security() {
 #[tokio::test]
 async fn validates_responses() {
     let req = Request::get("/broken").body(Body::empty()).unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body, json!({ "errors": [{ "detail": "Internal server error" }] }));
 
     let req = Request::get("/undeclared").body(Body::empty()).unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body, json!({ "errors": [{ "detail": "Internal server error" }] }));
 }
@@ -538,7 +571,7 @@ async fn validates_responses() {
 #[tokio::test]
 async fn uses_default_response_and_custom_headers() {
     let req = Request::get("/teapot").body(Body::empty()).unwrap();
-    let (status, headers, body) = send(app(Default::default()), req).await;
+    let (status, headers, body) = send(app(), req).await;
     assert_eq!(status, StatusCode::IM_A_TEAPOT);
     assert_eq!(headers[header::CONTENT_TYPE], "text/plain");
     assert_eq!(headers[header::CACHE_CONTROL], "no-store");
@@ -551,7 +584,7 @@ async fn handles_octet_streams() {
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .body(Body::from(vec![1u8, 2, 3]))
         .unwrap();
-    let (status, headers, body) = send(app(Default::default()), req).await;
+    let (status, headers, body) = send(app(), req).await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(headers[header::CONTENT_TYPE], "application/octet-stream");
     assert_eq!(body, vec![3u8, 2, 1]);
@@ -560,13 +593,13 @@ async fn handles_octet_streams() {
 #[tokio::test]
 async fn responds_not_found() {
     let req = Request::get("/nope").body(Body::empty()).unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body, json!({ "errors": [{ "detail": "Cannot find GET /nope" }] }));
 
     // the path exists but not with this method
     let req = Request::delete("/echo/simple/body").body(Body::empty()).unwrap();
-    let (status, body) = send_json(app(Default::default()), req).await;
+    let (status, body) = send_json(app(), req).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(
         body,
@@ -575,7 +608,7 @@ async fn responds_not_found() {
 
     // hidden endpoints are still accessible
     let req = Request::get("/hidden").body(Body::empty()).unwrap();
-    let (status, _, body) = send(app(Default::default()), req).await;
+    let (status, _, body) = send(app(), req).await;
     assert_eq!((status, body), (StatusCode::OK, b"hidden".to_vec()));
 }
 
@@ -608,7 +641,7 @@ async fn applies_cors() {
         .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
         .body(Body::empty())
         .unwrap();
-    let (status, headers, _) = send(app(Default::default()), req).await;
+    let (status, headers, _) = send(app(), req).await;
     assert!(status.is_success());
     assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
     assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_HEADERS], "content-type");
@@ -616,20 +649,12 @@ async fn applies_cors() {
 
 #[tokio::test]
 async fn serves_docs() {
-    let (status, headers, body) = send(
-        app(Default::default()),
-        Request::get("/openapi.json").body(Body::empty()).unwrap(),
-    )
-    .await;
+    let (status, headers, body) = send(app(), Request::get("/openapi.json").body(Body::empty()).unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[header::CONTENT_TYPE], "application/json");
     assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), spec());
 
-    let (status, headers, body) = send(
-        app(Default::default()),
-        Request::get("/docs").body(Body::empty()).unwrap(),
-    )
-    .await;
+    let (status, headers, body) = send(app(), Request::get("/docs").body(Body::empty()).unwrap()).await;
     let html = String::from_utf8(body).unwrap();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[header::CONTENT_TYPE], "text/html");
@@ -696,9 +721,13 @@ fn builds_openapi_document() {
         json!({ "type": "http", "scheme": "Bearer", "bearerFormat": "JWT" })
     );
 
-    let query = &spec["paths"]["/echo/simple/query"]["post"]["parameters"][0]["schema"];
-    assert_eq!(query["prefixItems"], json!([{ "type": "string" }]));
-    assert!(query.get("items").is_none());
+    let coords = &spec["components"]["schemas"]["EchoBodySimpleRequestBody"]["properties"]["coords"];
+    assert_eq!(coords["prefixItems"].as_array().unwrap().len(), 2);
+    assert!(coords.get("items").is_none() || coords["items"] == json!(false));
+    assert_eq!(
+        spec["components"]["schemas"]["SubscribeRequestBody"]["properties"]["email"]["format"],
+        "email"
+    );
 
     let user_path = &spec["paths"]["/users/{user_id}"]["put"];
     assert_eq!(user_path["parameters"][0]["schema"]["type"], "integer");
@@ -735,20 +764,7 @@ fn groups_endpoints() {
     assert_eq!(merged[0].1.meta().tags[0].name, "Simple");
     assert_eq!(merged[0].1.meta().deprecated, Some(true));
 
-    let spec = build_json(&BuilderConfig::new(
-        oas::Info {
-            title: "t".into(),
-            version: "1".into(),
-            summary: None,
-            description: None,
-            terms_of_service: None,
-            contact: None,
-            license: None,
-            extensions: Default::default(),
-        },
-        &merged,
-    ))
-    .unwrap();
+    let spec = build_json(&BuilderConfig::new("t", "1"), &merged).unwrap();
     assert_eq!(spec["paths"]["/v1/echo/{path}"]["post"]["tags"], json!(["Simple"]));
     assert_eq!(spec["paths"]["/v1/echo/{path}"]["post"]["deprecated"], true);
     assert_eq!(spec["tags"], json!([{ "name": "Simple" }]));

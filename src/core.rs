@@ -1,4 +1,5 @@
 use std::any::TypeId;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
@@ -20,13 +21,12 @@ use http::{
     StatusCode,
 };
 use oas3::spec;
-use schemars::gen::SchemaGenerator;
-use schemars::schema::{
-    InstanceType,
+use schemars::{
+    json_schema,
+    JsonSchema,
     Schema,
-    SchemaObject,
+    SchemaGenerator,
 };
-use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{
     Deserialize,
@@ -207,24 +207,20 @@ impl<'de> Deserialize<'de> for File {
 }
 
 impl JsonSchema for File {
-    fn schema_name() -> String {
-        "File".to_string()
+    fn schema_name() -> Cow<'static, str> {
+        "File".into()
     }
 
-    fn is_referenceable() -> bool {
-        false
+    fn inline_schema() -> bool {
+        true
     }
 
     fn json_schema(_: &mut SchemaGenerator) -> Schema {
-        let mut schema = SchemaObject {
-            instance_type: Some(InstanceType::String.into()),
-            format: Some("binary".to_string()),
-            ..Default::default()
-        };
-        schema
-            .extensions
-            .insert("contentMediaType".to_string(), "application/octet-stream".into());
-        schema.into()
+        json_schema!({
+            "type": "string",
+            "format": "binary",
+            "contentMediaType": "application/octet-stream",
+        })
     }
 }
 
@@ -474,29 +470,54 @@ pub enum ResponseSpec {
     Described(String),
 }
 
-impl<T> From<SenderBody<T>> for ResponseSpec {
-    fn from(value: SenderBody<T>) -> Self {
-        Self::Body(value.descriptor)
+/// Values accepted by [`Endpoint::response`] for an endpoint whose response type is `R`.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` cannot declare a response of an endpoint returning `{R}`",
+    note = "declare the main body response with `.returns(status, body)` first; further body responses must have the same type",
+    note = "use an enum or `serde_json::Value` to return different shapes",
+    note = "`true` or a description declares a JSON:API error response"
+)]
+pub trait IntoResponseSpec<R> {
+    fn into_response_spec(self) -> ResponseSpec;
+}
+
+impl<R> IntoResponseSpec<R> for SenderBody<R> {
+    fn into_response_spec(self) -> ResponseSpec {
+        ResponseSpec::Body(self.descriptor)
     }
 }
 
-impl From<bool> for ResponseSpec {
-    fn from(_: bool) -> Self {
-        Self::Declared
+impl<R> IntoResponseSpec<R> for bool {
+    fn into_response_spec(self) -> ResponseSpec {
+        ResponseSpec::Declared
     }
 }
 
-impl From<&str> for ResponseSpec {
-    fn from(value: &str) -> Self {
-        Self::Described(value.to_string())
+impl<R> IntoResponseSpec<R> for &str {
+    fn into_response_spec(self) -> ResponseSpec {
+        ResponseSpec::Described(self.to_string())
     }
 }
 
-impl From<String> for ResponseSpec {
-    fn from(value: String) -> Self {
-        Self::Described(value)
+impl<R> IntoResponseSpec<R> for String {
+    fn into_response_spec(self) -> ResponseSpec {
+        ResponseSpec::Described(self)
     }
 }
+
+/// The response type of an [`Endpoint`] before `.returns(..)` is called.
+#[derive(Debug, Clone, Copy)]
+pub struct NoResponse;
+
+/// A type an endpoint handler can respond with.
+#[diagnostic::on_unimplemented(
+    message = "the endpoint has no declared response type",
+    label = "`.handler(..)` requires a response type",
+    note = "call `.returns(status, body)` (or `.returns_default(body)`) before `.handler(..)`"
+)]
+pub trait ResponsePayload: Serialize + Send + 'static {}
+
+impl<T: Serialize + Send + 'static> ResponsePayload for T {}
 
 /// Schemas of the parameters of an endpoint.
 #[derive(Debug, Clone, Default)]
@@ -553,7 +574,9 @@ pub struct Request<Q = (), H = (), P = (), C = (), B = ()> {
 
 /// The context of a request passed to the endpoint handler.
 #[derive(Debug)]
-pub struct Context {
+pub struct Context<S = ()> {
+    /// The state of the router, see [`axum::Router::with_state`].
+    pub state: S,
     /// The applied securities of the endpoint.
     pub security: Vec<AppliedSecurity>,
     /// Objects attached by the security handlers.
@@ -708,16 +731,25 @@ pub(crate) enum HandlerError {
     Api(ApiError),
 }
 
-type ErasedHandler = Arc<dyn Fn(RawInput, Context) -> BoxFuture<Result<ErasedResponse, HandlerError>> + Send + Sync>;
+type ErasedHandler<S> =
+    Arc<dyn Fn(RawInput, Context<S>) -> BoxFuture<Result<ErasedResponse, HandlerError>> + Send + Sync>;
 
-/// A type-erased endpoint, created by [`Endpoint::handler`].
-#[derive(Clone)]
-pub struct LinzEndpoint {
+/// A type-erased endpoint, created by [`Endpoint::handler`]. `S` is the router state.
+pub struct LinzEndpoint<S = ()> {
     pub(crate) meta: EndpointMeta,
-    pub(crate) handler: ErasedHandler,
+    pub(crate) handler: ErasedHandler<S>,
 }
 
-impl LinzEndpoint {
+impl<S> Clone for LinzEndpoint<S> {
+    fn clone(&self) -> Self {
+        Self {
+            meta: self.meta.clone(),
+            handler: self.handler.clone(),
+        }
+    }
+}
+
+impl<S> LinzEndpoint<S> {
     pub fn meta(&self) -> &EndpointMeta {
         &self.meta
     }
@@ -731,7 +763,7 @@ impl LinzEndpoint {
     }
 }
 
-impl fmt::Debug for LinzEndpoint {
+impl<S> fmt::Debug for LinzEndpoint<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LinzEndpoint")
             .field("meta", &self.meta)
@@ -740,16 +772,17 @@ impl fmt::Debug for LinzEndpoint {
 }
 
 /// A list of `method:path` keys (e.g. `get:/users/:id`) and their endpoints.
-pub type LinzEndpointGroup = Vec<(String, LinzEndpoint)>;
+pub type LinzEndpointGroup<S = ()> = Vec<(String, LinzEndpoint<S>)>;
 
 /// A builder of an endpoint. The type parameters are the query (`Q`), header (`H`),
-/// path (`P`), cookie (`C`) and body (`B`) types of the validated [`Request`].
-pub struct Endpoint<Q = (), H = (), P = (), C = (), B = ()> {
+/// path (`P`), cookie (`C`) and body (`B`) types of the validated [`Request`], and the
+/// response type (`R`) set by [`Endpoint::returns`].
+pub struct Endpoint<Q = (), H = (), P = (), C = (), B = (), R = NoResponse> {
     meta: EndpointMeta,
-    _marker: TypeMarker<Q, H, P, C, B>,
+    _marker: TypeMarker<Q, H, P, C, B, R>,
 }
 
-type TypeMarker<Q, H, P, C, B> = PhantomData<fn() -> (Q, H, P, C, B)>;
+type TypeMarker<Q, H, P, C, B, R> = PhantomData<fn() -> (Q, H, P, C, B, R)>;
 
 impl Endpoint {
     pub fn new(operation_id: impl Into<String>) -> Self {
@@ -763,8 +796,8 @@ impl Endpoint {
     }
 }
 
-impl<Q, H, P, C, B> Endpoint<Q, H, P, C, B> {
-    fn retype<Q2, H2, P2, C2, B2>(self) -> Endpoint<Q2, H2, P2, C2, B2> {
+impl<Q, H, P, C, B, R> Endpoint<Q, H, P, C, B, R> {
+    fn retype<Q2, H2, P2, C2, B2, R2>(self) -> Endpoint<Q2, H2, P2, C2, B2, R2> {
         Endpoint {
             meta: self.meta,
             _marker: PhantomData,
@@ -807,63 +840,148 @@ impl<Q, H, P, C, B> Endpoint<Q, H, P, C, B> {
         self
     }
 
-    pub fn query<T: DataTransferObject>(mut self) -> Endpoint<T, H, P, C, B> {
+    pub fn query<T: DataTransferObject>(mut self) -> Endpoint<T, H, P, C, B, R> {
         self.meta.parameters.query = Some(TypeSchema::of::<T>());
         self.retype()
     }
 
-    pub fn header<T: DataTransferObject>(mut self) -> Endpoint<Q, T, P, C, B> {
+    pub fn header<T: DataTransferObject>(mut self) -> Endpoint<Q, T, P, C, B, R> {
         self.meta.parameters.header = Some(TypeSchema::of::<T>());
         self.retype()
     }
 
-    pub fn path<T: DataTransferObject>(mut self) -> Endpoint<Q, H, T, C, B> {
+    pub fn path<T: DataTransferObject>(mut self) -> Endpoint<Q, H, T, C, B, R> {
         self.meta.parameters.path = Some(TypeSchema::of::<T>());
         self.retype()
     }
 
-    pub fn cookie<T: DataTransferObject>(mut self) -> Endpoint<Q, H, P, T, B> {
+    pub fn cookie<T: DataTransferObject>(mut self) -> Endpoint<Q, H, P, T, B, R> {
         self.meta.parameters.cookie = Some(TypeSchema::of::<T>());
         self.retype()
     }
 
-    pub fn request_body<T: DataTransferObject>(mut self, body: SenderBody<T>) -> Endpoint<Q, H, P, C, T> {
+    pub fn request_body<T: DataTransferObject>(mut self, body: SenderBody<T>) -> Endpoint<Q, H, P, C, T, R> {
         self.meta.request_body = Some(body.descriptor);
         self.retype()
     }
 
-    /// Declares a response. Accepts a [`SenderBody`], `true` or a description
-    /// (the latter two declare a JSON:API error response).
-    pub fn response(mut self, status: u16, spec: impl Into<ResponseSpec>) -> Self {
-        self.meta.responses.insert(status, spec.into());
+    /// Declares another response. Accepts a [`SenderBody`] of the response type `R`, or
+    /// `true`/a description, which declare a JSON:API error response.
+    pub fn response(mut self, status: u16, spec: impl IntoResponseSpec<R>) -> Self {
+        self.meta.responses.insert(status, spec.into_response_spec());
         self
     }
 
-    /// Declares the response used when no response is declared for a status.
-    pub fn default_response<T>(mut self, body: SenderBody<T>) -> Self {
+    /// Declares the response used for statuses that have no declaration.
+    pub fn default_response(mut self, body: SenderBody<R>) -> Self {
         self.meta.default_response = Some(body.descriptor);
         self
     }
 }
 
-impl<Q, H, P, C, B> Endpoint<Q, H, P, C, B>
+impl<Q, H, P, C, B> Endpoint<Q, H, P, C, B, NoResponse> {
+    /// Declares the main response and sets the response type of the handler to `T`.
+    /// Further body responses declared with [`Endpoint::response`] must also be of type `T`.
+    ///
+    /// ```
+    /// use linz_rs::*;
+    ///
+    /// #[derive(serde::Serialize, schemars::JsonSchema)]
+    /// struct User {
+    ///     id: u32,
+    /// }
+    ///
+    /// let endpoint: LinzEndpoint = Endpoint::new("getUser")
+    ///     .returns(200, JsonBody::new::<User>())
+    ///     .response(404, true)
+    ///     .handler(|_, _| async move { Ok(User { id: 1 }) });
+    /// ```
+    ///
+    /// Returning another type does not compile:
+    ///
+    /// ```compile_fail
+    /// # use linz_rs::*;
+    /// # #[derive(serde::Serialize, schemars::JsonSchema)]
+    /// # struct User { id: u32 }
+    /// let endpoint: LinzEndpoint = Endpoint::new("getUser")
+    ///     .returns(200, JsonBody::new::<User>())
+    ///     .handler(|_, _| async move { Ok("not a user".to_string()) });
+    /// ```
+    ///
+    /// Neither does declaring a body response of another type:
+    ///
+    /// ```compile_fail
+    /// # use linz_rs::*;
+    /// # #[derive(serde::Serialize, schemars::JsonSchema)]
+    /// # struct User { id: u32 }
+    /// let endpoint: LinzEndpoint = Endpoint::new("getUser")
+    ///     .returns(200, JsonBody::new::<User>())
+    ///     .response(202, TextBody::new())
+    ///     .handler(|_, _| async move { Ok(User { id: 1 }) });
+    /// ```
+    ///
+    /// Nor finishing an endpoint without a response type:
+    ///
+    /// ```compile_fail
+    /// # use linz_rs::*;
+    /// let endpoint: LinzEndpoint = Endpoint::new("ping").handler(|_, _| async move { Ok(()) });
+    /// ```
+    pub fn returns<T>(mut self, status: u16, body: SenderBody<T>) -> Endpoint<Q, H, P, C, B, T> {
+        self.meta.responses.insert(status, ResponseSpec::Body(body.descriptor));
+        self.retype()
+    }
+
+    /// Like [`Endpoint::returns`], but declares the default response.
+    pub fn returns_default<T>(mut self, body: SenderBody<T>) -> Endpoint<Q, H, P, C, B, T> {
+        self.meta.default_response = Some(body.descriptor);
+        self.retype()
+    }
+}
+
+impl<Q, H, P, C, B, R> Endpoint<Q, H, P, C, B, R>
 where
     Q: DataTransferObject,
     H: DataTransferObject,
     P: DataTransferObject,
     C: DataTransferObject,
     B: DataTransferObject,
+    R: ResponsePayload,
 {
     /// Sets the handler and finishes the endpoint.
-    pub fn handler<R, F, Fut>(self, handler: F) -> LinzEndpoint
+    ///
+    /// The handler returns `Ok` with either the response type `R` or an [`HttpResponse<R>`],
+    /// or `Err` with an [`ApiError`]. `S` is the state of the router, available as
+    /// [`Context::state`]. Handlers that read the state annotate the context type, like
+    /// axum's `State<S>` extractor:
+    ///
+    /// ```
+    /// use linz_rs::*;
+    ///
+    /// #[derive(Clone)]
+    /// struct AppState {
+    ///     name: String,
+    /// }
+    ///
+    /// fn greet() -> LinzEndpoint<AppState> {
+    ///     Endpoint::new("greet")
+    ///         .returns(200, TextBody::new())
+    ///         .handler(|_, ctx: Context<AppState>| async move { Ok(format!("hello from {}", ctx.state.name)) })
+    /// }
+    ///
+    /// let app: axum::Router = create_api(axum::Router::new(), vec![("get:/greet".into(), greet())], Default::default())
+    ///     .unwrap()
+    ///     .with_state(AppState { name: "linz".into() });
+    /// ```
+    pub fn handler<S, O, F, Fut>(self, handler: F) -> LinzEndpoint<S>
     where
-        R: Serialize + Send + 'static,
-        F: Fn(Request<Q, H, P, C, B>, Context) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<HttpResponse<R>, ApiError>> + Send + 'static,
+        S: Send + 'static,
+        O: Into<HttpResponse<R>>,
+        F: Fn(Request<Q, H, P, C, B>, Context<S>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<O, ApiError>> + Send + 'static,
     {
         let handler = Arc::new(handler);
 
-        let erased: ErasedHandler = Arc::new(move |input: RawInput, ctx: Context| {
+        let erased: ErasedHandler<S> = Arc::new(move |input: RawInput, ctx: Context<S>| {
             let mut issues = Vec::new();
 
             let body = decode_part::<B>("body", input.body, &mut issues);
@@ -889,7 +1007,7 @@ where
             Box::pin(async move {
                 handler(request, ctx)
                     .await
-                    .map(HttpResponse::erase)
+                    .map(|output| output.into().erase())
                     .map_err(HandlerError::Api)
             })
         });

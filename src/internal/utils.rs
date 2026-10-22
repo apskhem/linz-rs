@@ -45,37 +45,15 @@ pub(crate) fn headers_to_json(headers: &HeaderMap<HeaderValue>) -> Value {
     Value::Object(map)
 }
 
-/// Converts a query string into a JSON object. With `multi_value` each value is an
-/// array of all occurrences, otherwise only the last value is used.
-pub(crate) fn query_to_json(query: Option<&str>, multi_value: bool) -> Value {
-    pairs_to_json(
-        url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()).into_owned(),
-        multi_value,
-    )
+/// Converts a query string into a JSON object of strings. When a key repeats, the last
+/// occurrence is used.
+pub(crate) fn query_to_json(query: Option<&str>) -> Value {
+    pairs_to_json(url::form_urlencoded::parse(query.unwrap_or_default().as_bytes()).into_owned())
 }
 
-pub(crate) fn pairs_to_json(pairs: impl IntoIterator<Item = (String, String)>, multi_value: bool) -> Value {
-    let mut merged: Vec<(String, Vec<Value>)> = Vec::new();
-
-    for (key, value) in pairs {
-        match merged.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, values)) => values.push(Value::String(value)),
-            None => merged.push((key, vec![Value::String(value)])),
-        }
-    }
-
-    Value::Object(
-        merged
-            .into_iter()
-            .map(|(key, mut values)| {
-                if multi_value {
-                    (key, Value::Array(values))
-                } else {
-                    (key, values.pop().unwrap_or(Value::Null))
-                }
-            })
-            .collect(),
-    )
+/// Collects key-value pairs into a JSON object. When a key repeats, the last occurrence is used.
+pub(crate) fn pairs_to_json(pairs: impl IntoIterator<Item = (String, String)>) -> Value {
+    Value::Object(pairs.into_iter().map(|(k, v)| (k, Value::String(v))).collect())
 }
 
 /// Parses a `Cookie` header string into key-value pairs according to RFC 6265.
@@ -288,14 +266,10 @@ mod tests {
     }
 
     #[test]
-    fn merges_query_values() {
+    fn uses_last_query_value() {
         assert_eq!(
-            query_to_json(Some("a=1&b=2&a=3"), false),
+            query_to_json(Some("a=1&b=2&a=3")),
             serde_json::json!({"a": "3", "b": "2"})
-        );
-        assert_eq!(
-            query_to_json(Some("a=1&b=2&a=3"), true),
-            serde_json::json!({"a": ["1", "3"], "b": ["2"]})
         );
     }
 }

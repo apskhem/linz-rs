@@ -5,7 +5,6 @@ use serde_json::{
     Value,
 };
 
-use crate::adapter::RequestConfig;
 use crate::core::{
     BodyKind,
     File,
@@ -94,12 +93,9 @@ pub(crate) struct ParsedBody {
     pub textual: bool,
 }
 
-/// Parses a request body according to its `Content-Type`. Empty bodies yield `None`.
-pub(crate) fn parse_body(
-    body: &Bytes,
-    content_type_header: &str,
-    config: &RequestConfig,
-) -> Result<Option<ParsedBody>, BodyParserError> {
+/// Parses a request body according to its `Content-Type`. Empty bodies yield `None`. When a
+/// form field repeats, the last occurrence is used.
+pub(crate) fn parse_body(body: &Bytes, content_type_header: &str) -> Result<Option<ParsedBody>, BodyParserError> {
     if body.is_empty() {
         return Ok(None);
     }
@@ -149,12 +145,12 @@ pub(crate) fn parse_body(
                 pairs.push((name, value));
             }
 
-            (merge_values(pairs, config.multi_value_form_data), true)
+            (Value::Object(pairs.into_iter().collect::<Map<_, _>>()), true)
         }
         "application/x-www-form-urlencoded" => {
             let text = decode_text(body, charset).map_err(|e| BodyParserError::new(StatusCode::BAD_REQUEST, e))?;
             let pairs = url::form_urlencoded::parse(text.as_bytes()).into_owned();
-            (utils::pairs_to_json(pairs, config.multi_value_url_encoded), true)
+            (utils::pairs_to_json(pairs), true)
         }
         "application/octet-stream" => {
             let placeholder = files.insert(File {
@@ -173,30 +169,6 @@ pub(crate) fn parse_body(
     };
 
     Ok(Some(ParsedBody { value, files, textual }))
-}
-
-fn merge_values(pairs: Vec<(String, Value)>, multi_value: bool) -> Value {
-    let mut merged: Vec<(String, Vec<Value>)> = Vec::new();
-
-    for (key, value) in pairs {
-        match merged.iter_mut().find(|(k, _)| *k == key) {
-            Some((_, values)) => values.push(value),
-            None => merged.push((key, vec![value])),
-        }
-    }
-
-    Value::Object(
-        merged
-            .into_iter()
-            .map(|(key, mut values)| {
-                if multi_value {
-                    (key, Value::Array(values))
-                } else {
-                    (key, values.pop().unwrap_or(Value::Null))
-                }
-            })
-            .collect::<Map<_, _>>(),
-    )
 }
 
 /// An encoded response body.
@@ -317,11 +289,9 @@ mod tests {
 
     #[test]
     fn parses_bodies() {
-        let config = RequestConfig::default();
+        assert!(parse_body(&Bytes::new(), "").unwrap().is_none());
 
-        assert!(parse_body(&Bytes::new(), "", &config).unwrap().is_none());
-
-        let json = parse_body(&Bytes::from_static(b"{\"a\":1}"), "application/json", &config)
+        let json = parse_body(&Bytes::from_static(b"{\"a\":1}"), "application/json")
             .unwrap()
             .unwrap();
         assert_eq!(json.value, serde_json::json!({"a": 1}));
@@ -329,16 +299,15 @@ mod tests {
         let form = parse_body(
             &Bytes::from_static(b"a=1&a=2&b=x+y"),
             "application/x-www-form-urlencoded",
-            &config,
         )
         .unwrap()
         .unwrap();
         assert_eq!(form.value, serde_json::json!({"a": "2", "b": "x y"}));
 
-        let err = parse_body(&Bytes::from_static(b"x"), "text/csv", &config).unwrap_err();
+        let err = parse_body(&Bytes::from_static(b"x"), "text/csv").unwrap_err();
         assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
 
-        let err = parse_body(&Bytes::from_static(b"{"), "application/json", &config).unwrap_err();
+        let err = parse_body(&Bytes::from_static(b"{"), "application/json").unwrap_err();
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 }

@@ -13,10 +13,13 @@ use crate::security::AppliedSecurity;
 /// prefix `/v1/` becomes `get:/v1/users`.
 ///
 /// Returns an error if duplicated keys occur after applying the prefix.
-pub fn merge_endpoint_groups(prefix: &str, groups: Vec<LinzEndpointGroup>) -> Result<LinzEndpointGroup, String> {
+pub fn merge_endpoint_groups<S>(
+    prefix: &str,
+    groups: Vec<LinzEndpointGroup<S>>,
+) -> Result<LinzEndpointGroup<S>, String> {
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
-    let mut merged = LinzEndpointGroup::new();
+    let mut merged = Vec::new();
 
     for group in groups {
         for (method_path, endpoint) in group {
@@ -52,7 +55,7 @@ pub struct GroupConfig {
 }
 
 /// Applies a common configuration to all endpoints within a group.
-pub fn apply_group_config(mut group: LinzEndpointGroup, config: GroupConfig) -> LinzEndpointGroup {
+pub fn apply_group_config<S>(mut group: LinzEndpointGroup<S>, config: GroupConfig) -> LinzEndpointGroup<S> {
     for (_, endpoint) in group.iter_mut() {
         let meta = endpoint.meta_mut();
 

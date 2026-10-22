@@ -2,7 +2,7 @@
 
 linz-rs is a Rust port of [Linz](https://github.com/apskhem/linz). It is a thin layer on top of
 [axum](https://github.com/tokio-rs/axum) for declaring HTTP endpoints. Each endpoint is validated
-against JSON schemas that [schemars](https://docs.rs/schemars/0.8) generates from your Rust types,
+against JSON schemas that [schemars](https://docs.rs/schemars/1) generates from your Rust types,
 and the same schemas produce an OpenAPI 3.1 document.
 
 This manual has three parts:
@@ -27,7 +27,7 @@ This manual has three parts:
 - [9. Security](#9-security)
 - [10. Grouping endpoints](#10-grouping-endpoints)
 - [11. OpenAPI document and docs viewer](#11-openapi-document-and-docs-viewer)
-- [12. `create_api` configuration](#12-create_api-configuration)
+- [12. `create_api` configuration and state](#12-create_api-configuration-and-state)
 - [13. How-to recipes](#13-how-to-recipes)
 - [14. Request lifecycle](#14-request-lifecycle)
 - [15. Notes, gotchas and limitations](#15-notes-gotchas-and-limitations)
@@ -41,13 +41,13 @@ This manual has three parts:
 | Concept | Type | Description |
 | --- | --- | --- |
 | DTO | any `JsonSchema + DeserializeOwned` type | Describes a request part (query, header, path, cookie or body) and is validated against its schema. |
-| Endpoint builder | `Endpoint<Q, H, P, C, B>` | Declares the parameters, body, responses, security and metadata of one operation. |
-| Endpoint | `LinzEndpoint` | A finished, type-erased endpoint, produced by `Endpoint::handler`. |
-| Endpoint group | `LinzEndpointGroup` = `Vec<(String, LinzEndpoint)>` | A list of `method:path` keys and endpoints, e.g. `"get:/users/:id"`. |
+| Endpoint builder | `Endpoint<Q, H, P, C, B, R>` | Declares the parameters, body, responses, security and metadata of one operation. `R` is the response type, set by `.returns(..)`. |
+| Endpoint | `LinzEndpoint<S = ()>` | A finished, type-erased endpoint, produced by `Endpoint::handler`. `S` is the router state. |
+| Endpoint group | `LinzEndpointGroup<S = ()>` = `Vec<(String, LinzEndpoint<S>)>` | A list of `method:path` keys and endpoints, e.g. `"get:/users/:id"`. |
 | Sender body | `SenderBody<T>` | A typed request or response body with a content type (`JsonBody`, `FormDataBody`, ...). |
 | Security | `Security` / `AppliedSecurity` | An authentication scheme, and that scheme applied to an endpoint with scopes. |
-| Adapter | `create_api` | Registers endpoints, docs, CORS and the fallback on an `axum::Router`. |
-| Builder | `build_json` | Produces the OpenAPI 3.1 document from an endpoint group. |
+| Adapter | `create_api` | Registers endpoints, the docs, CORS and the fallback on an `axum::Router`. |
+| Builder | `build_json` | Produces the OpenAPI 3.1 document. `create_api` calls it for you when docs are enabled. |
 
 Everything public is re-exported from the crate root, so `use linz_rs::*;` is usually enough.
 The `security` module (`AuthenticationScheme`, `In`, `oauth2_flows`) and the `oas` module (OpenAPI
@@ -62,25 +62,24 @@ types such as `Info`, `Tag`, `Server` and `Example`, re-exported from `oas3::spe
 linz-rs = { path = "../linz-rs" }       # or a git dependency
 axum = { version = "0.8", features = ["tokio", "http1"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
-schemars = "0.8"
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 http = "1"
 ```
 
-linz-rs depends on axum with `default-features = false`. Enable the axum features your server
-needs (for example `tokio` and `http1` for `axum::serve`) in your own `Cargo.toml`, and Cargo's
-feature unification turns them on.
-
-The library crate is named `linz_rs`.
+- **schemars**: linz-rs uses **schemars 1.x**. Your DTOs must derive `JsonSchema` from the same
+  major version.
+- **axum features**: linz-rs depends on axum with `default-features = false`. Enable the axum
+  features your server needs (for example `tokio` and `http1` for `axum::serve`) in your own
+  `Cargo.toml`, and Cargo's feature unification turns them on.
+- **Crate name**: the library crate is named `linz_rs`.
 
 ---
 
 ## 3. Quick start
 
 ```rust
-use std::sync::Arc;
-
 use axum::Router;
 use http::StatusCode;
 use linz_rs::*;
@@ -113,53 +112,37 @@ fn endpoints() -> LinzEndpointGroup {
             Endpoint::new("getUser")
                 .summary("Get a user")
                 .path::<UserPath>()
-                .response(200, JsonBody::new::<User>())
+                .returns(200, JsonBody::new::<User>())
                 .response(404, "The user does not exist")
                 .handler(|req, _ctx| async move {
                     if req.params.user_id != 1 {
                         return Err(ApiError::detail(StatusCode::NOT_FOUND, "User not found"));
                     }
-                    Ok(User { id: 1, username: "alice".into() }.into())
+                    Ok(User { id: 1, username: "alice".into() })
                 }),
         ),
         (
             "post:/users".to_string(),
             Endpoint::new("createUser")
                 .request_body(JsonBody::new::<CreateUser>())
-                .response(201, JsonBody::new::<User>())
+                .returns(201, JsonBody::new::<User>())
                 .handler(|req, _ctx| async move {
-                    Ok(User { id: 2, username: req.body.username }.into())
+                    Ok(User { id: 2, username: req.body.username })
                 }),
         ),
     ]
 }
 
-fn info() -> oas::Info {
-    oas::Info {
-        title: "My API".into(),
-        version: "1.0.0".into(),
-        summary: None,
-        description: None,
-        terms_of_service: None,
-        contact: None,
-        license: None,
-        extensions: Default::default(),
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let endpoints = endpoints();
-    let spec = build_json(&BuilderConfig::new(info(), &endpoints))?;
-
     let app = create_api(
         Router::new(),
-        endpoints,
+        endpoints(),
         CreateApiConfig {
             cors: Some(CorsConfig::Permissive),
             docs: Some(DocsConfig {
                 viewer: DocsViewer::Scalar,
-                spec,
+                spec: BuilderConfig::new("My API", "1.0.0"),
                 docs_path: "/docs".into(),
                 spec_path: "/openapi.json".into(),
                 theme: None,
@@ -182,15 +165,15 @@ $ curl -s localhost:3000/users/1
 
 $ curl -s -X POST localhost:3000/users -H 'content-type: application/json' -d '{"username":"al","age":12}'
 {"errors":[{"meta":{"in":"body","result":[
-  {"path":["age"],"message":"12 is less than the minimum of 18.0"},
-  {"path":["username"],"message":"\"al\" is shorter than 3 characters"}]}}]}
+  {"path":["username"],"message":"\"al\" is shorter than 3 characters"},
+  {"path":["age"],"message":"12 is less than the minimum of 18"}]}}]}
 
 $ curl -s localhost:3000/nope
 {"errors":[{"detail":"Cannot find GET /nope"}]}
 ```
 
-Open `http://localhost:3000/docs` for the API reference. The `examples/bootstrap.rs` file is a
-complete example (`cargo run --example bootstrap`).
+Open `http://localhost:3000/docs` for the API reference. `examples/bootstrap.rs` is a complete
+example (`cargo run --example bootstrap`).
 
 ---
 
@@ -201,8 +184,8 @@ A DTO is any type that implements `JsonSchema + DeserializeOwned + Send + 'stati
 implement it yourself.
 
 Every request part is processed the same way. It is converted into JSON, coerced where needed
-(see [4.2](#42-coercion-of-textual-inputs)), validated against the JSON schema of the DTO, and
-finally deserialized with serde.
+(see [4.2](#42-coercion-of-textual-inputs)), validated against the JSON schema of the DTO
+(draft 2020-12), and finally deserialized with serde.
 
 ### 4.1 Validation attributes
 
@@ -214,21 +197,23 @@ use) become JSON-schema keywords, and those keywords are enforced at runtime:
 | `length(min = a, max = b)` | `minLength`/`maxLength`, `minItems`/`maxItems` | strings, collections |
 | `length(equal = n)` | both bounds | strings, collections |
 | `range(min = a, max = b)` | `minimum`/`maximum` | numbers |
-| `regex(path = "CONST")` / `regex = "CONST"` | `pattern` | strings |
-| `contains = "x"` | `pattern` / `contains` | strings, collections |
-| `required` | marks an `Option` field as required | `Option<T>` |
+| `regex(pattern = CONST_OR_LITERAL)` | `pattern` | strings |
+| `contains(pattern = "x")` | `pattern` / `contains` | strings, collections |
+| `email` | `format: email` | strings |
+| `url` | `format: uri` | strings |
+| `required` | makes an `Option` field required and non-null | `Option<T>` |
 | enum types | `enum` / `oneOf` | enums |
 | unsigned integers | `minimum: 0` | `u8`–`u64`, `usize` |
 
 ```rust
-const EMAIL_REGEX: &str = r"^[\w\.-]+@[\w\.-]+\.\w+$";
+const USERNAME_REGEX: &str = r"^[a-z0-9_]+$";
 
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct SignUp {
-    #[schemars(length(min = 3, max = 20))]
+    #[schemars(length(min = 3, max = 20), regex(pattern = USERNAME_REGEX))]
     user_name: String,
-    #[schemars(regex(path = "EMAIL_REGEX"))]
+    #[schemars(email)]
     email: String,
     #[schemars(range(min = 18))]
     age: u8,
@@ -237,11 +222,11 @@ struct SignUp {
 }
 ```
 
-> **Format keywords are not enforced.** Schemas are validated as JSON Schema draft 2019-09,
-> where `format` (`email`, `uri`, `date-time`, ...) is an annotation only. Use `regex` when
-> you need to enforce a format.
+**Formats are validated.** Recognized `format` values (`email`, `uri`, `date-time`, `date`,
+`time`, `uuid`, `ipv4`, `ipv6`, `hostname`, `regex`, ...) are enforced. Formats that schemars
+adds for numbers (`uint32`, `int64`, `double`, ...) are unknown to the validator and ignored.
 
-Serde attributes are respected by both the schema and deserialization:
+**Serde attributes** are respected by both the schema and deserialization:
 
 - `rename` and `rename_all` change the expected field names.
 - `#[serde(default)]` makes a field optional.
@@ -264,16 +249,15 @@ following:
 | `boolean` | exactly `"true"` / `"false"` | `true` / `false` |
 | `null` | `""` or `"null"` | `null` |
 
-The coercion follows `$ref`, `allOf`/`anyOf`/`oneOf`, nested objects, map values
-(`additionalProperties`), array items, and tuple items by position. A string that does not
-parse stays a string, so validation then fails with a normal 400. JSON bodies are **never**
-coerced.
+- The coercion follows `$ref`, `allOf`/`anyOf`/`oneOf`, and map values (`additionalProperties`).
+- A string that does not parse stays a string, so validation then fails with a normal 400.
+- JSON bodies are **never** coerced.
 
 ```rust
 #[derive(Deserialize, JsonSchema)]
 struct Pagination {
     #[serde(default = "default_limit")]
-    limit: u32,          // "?limit=50" -> 50
+    limit: u32,                    // "?limit=50" -> 50
     #[serde(default)]
     offset: u32,
     include_deleted: Option<bool>, // "?include_deleted=true" -> Some(true)
@@ -286,11 +270,15 @@ fn default_limit() -> u32 { 20 }
 
 | Part | JSON given to the DTO | Notes |
 | --- | --- | --- |
-| `queries` | object of `string`, or of `[string]` when `multi_value_query_string` is set | form-urlencoded decoding (`+` becomes a space). Without multi-value, the last occurrence wins. |
+| `queries` | object of `string` | form-urlencoded decoding (`+` becomes a space). When a key repeats, the **last** occurrence wins. |
 | `params` | object of `string` | Percent-decoded by axum. |
 | `headers` | object of `string`, every header of the request | Names are lower-case. Repeated headers are joined with `", "`. Non-UTF-8 values are skipped. |
 | `cookies` | object of `string` | Parsed from `Cookie`. Values are percent-decoded and the last duplicate wins. |
 | `body` | see [6](#6-request-bodies) | `null` when the body is empty. |
+
+Every query, cookie and form value is a single string, so DTO fields for them are scalars, not
+`Vec`s. To accept a list in a query parameter, use one value with a delimiter (`?tags=a,b`) and
+split it in the handler.
 
 Because header names are lower-case, rename header DTO fields:
 
@@ -304,21 +292,11 @@ struct ClientHeaders {
 }
 ```
 
-With `multi_value_query_string`, **every** query value is an array, even when it appears only
-once. Use `Vec<T>` or a tuple for such fields:
-
-```rust
-#[derive(Deserialize, JsonSchema)]
-struct Filter {
-    tag: Vec<String>,     // ?tag=a&tag=b -> ["a", "b"]
-    page: (u32,),         // ?page=2      -> (2,)
-}
-```
-
 ### 4.4 Unit type `()`
 
-`()` means "not declared". The endpoint builder starts with every part set to `()`, and an
-undeclared part is neither validated nor documented.
+`()` means "not declared". The endpoint builder starts with every request part set to `()`, and
+an undeclared part is neither validated nor documented. As a response type, `()` means
+"no body" (see [7.4](#74-empty-and-optional-bodies)).
 
 ---
 
@@ -337,8 +315,7 @@ Each endpoint is registered under a `method:path` key:
 
 ### 5.2 Builder
 
-`Endpoint::new(operation_id)` returns a builder. The type-changing methods set the DTO types of
-the request:
+`Endpoint::new(operation_id)` returns a builder. These methods set the request types:
 
 | Method | Effect |
 | --- | --- |
@@ -348,7 +325,16 @@ the request:
 | `.cookie::<C>()` | Validates the cookies into `req.cookies: C`. |
 | `.request_body(SenderBody<B>)` | Validates the body into `req.body: B`. |
 
-Metadata and response methods:
+These methods declare responses (see [7](#7-responses)):
+
+| Method | Effect |
+| --- | --- |
+| `.returns(status, SenderBody<R>)` | Declares the main response and **sets the handler's response type to `R`**. Call it once. |
+| `.returns_default(SenderBody<R>)` | Like `.returns`, but declares the `default` response. |
+| `.response(status, spec)` | Declares another response: a `SenderBody<R>` of the same type, or `true`/a description for a JSON:API error response. |
+| `.default_response(SenderBody<R>)` | Declares the response for statuses without their own declaration. |
+
+Metadata methods:
 
 | Method | Effect |
 | --- | --- |
@@ -357,32 +343,65 @@ Metadata and response methods:
 | `.hidden(bool)` | Leaves the endpoint out of the docs. It is still routed. |
 | `.deprecated(bool)` | Docs. |
 | `.security(AppliedSecurity)` | Adds an authentication step (see [9](#9-security)). Can be called repeatedly. |
-| `.response(status, spec)` | Declares a response (see [7](#7-responses)). |
-| `.default_response(SenderBody<T>)` | The response used for statuses that are not declared. |
-| `.handler(f)` | Finishes the builder and returns a `LinzEndpoint`. |
+| `.handler(f)` | Finishes the builder and returns a `LinzEndpoint<S>`. Requires `.returns`/`.returns_default` first. |
 
 Operation IDs must be unique within one `create_api` call.
 
 ### 5.3 Handler
 
 ```rust
-F: Fn(Request<Q, H, P, C, B>, Context) -> Fut + Send + Sync + 'static,
-Fut: Future<Output = Result<HttpResponse<R>, ApiError>> + Send + 'static,
-R: Serialize + Send + 'static,
+F: Fn(Request<Q, H, P, C, B>, Context<S>) -> Fut + Send + Sync + 'static,
+Fut: Future<Output = Result<O, ApiError>> + Send + 'static,
+O: Into<HttpResponse<R>>, // R itself, or HttpResponse<R>
 ```
 
+**Arguments:**
+
 - `Request { queries, headers, params, cookies, body }` holds the validated, deserialized parts.
-- `Context` contains:
+- `Context<S>` contains:
+  - `state: S`: the router state (see [12.3](#123-state)).
   - `security: Vec<AppliedSecurity>`: the securities of the endpoint, including their scopes.
   - `extensions: http::Extensions`: values inserted by the security handlers.
   - `request: http::request::Parts`: the raw method, URI, version, headers and axum extensions.
-- Return `Ok(value.into())` to respond with the default status. `HttpResponse<T>` implements
-  `From<T>`. Use the `HttpResponse` constructors to set a status, headers or a stream
-  (see [7.3](#73-httpresponse)).
-- Return `Err(ApiError)` to respond with a JSON:API error (see [8](#8-errors)).
 
-The handler is an `Fn`, so clone what you capture before moving it into the `async` block (see
-[13.10](#1310-share-state-database-pools-config)).
+**Return value:**
+
+- `Ok(value)` with a value of type `R` responds with the default status. Return
+  `Ok(HttpResponse<R>)` to set the status, headers or a stream (see [7.3](#73-httpresponse)).
+- `Err(ApiError)` responds with a JSON:API error (see [8](#8-errors)), and `?` works with
+  `ApiError`.
+- A handler that only returns errors needs the success type spelled out:
+  `Err::<User, _>(ApiError::detail(..))`.
+
+The handler is an `Fn`, so clone what you capture before moving it into the `async` block.
+
+### 5.4 What the compiler checks
+
+Each of these is a compile error:
+
+```rust
+// The handler returns a type other than the declared one.
+Endpoint::new("getUser")
+    .returns(200, JsonBody::new::<User>())
+    .handler(|_, _| async move { Ok("not a user".to_string()) });
+// error: the trait bound `HttpResponse<User>: From<String>` is not satisfied
+
+// A second body response has another type.
+Endpoint::new("getUser")
+    .returns(200, JsonBody::new::<User>())
+    .response(202, TextBody::new());
+// error: `SenderBody<String>` cannot declare a response of an endpoint returning `User`
+
+// No response type is declared.
+Endpoint::new("ping").handler(|_, _| async move { Ok(()) });
+// error: the method `handler` exists for struct `Endpoint`, but its trait bounds were not satisfied
+//        (the endpoint has no declared response type; call `.returns(status, body)` ...)
+```
+
+What the compiler cannot check, and is enforced at runtime with a `500`:
+
+- schema constraints of the response (e.g. `range`, `length`) for the actual value;
+- a status the handler returns that has no declaration.
 
 ---
 
@@ -391,7 +410,7 @@ The handler is an `Fn`, so clone what you capture before moving it into the `asy
 | Constructor | Content type | `B` |
 | --- | --- | --- |
 | `JsonBody::new::<B>()` | `application/json` | any DTO |
-| `UrlEncodedBody::new::<B>()` | `application/x-www-form-urlencoded` | struct of scalars (or `Vec`s with multi-value) |
+| `UrlEncodedBody::new::<B>()` | `application/x-www-form-urlencoded` | struct of scalars |
 | `FormDataBody::new::<B>()` | `multipart/form-data` | struct; file fields are `File` |
 | `OctetStreamBody::new()` | `application/octet-stream` | `File` |
 | `TextBody::new()` / `HtmlBody::new()` | `text/plain` / `text/html` | `String` (responses only, see note) |
@@ -401,21 +420,23 @@ Body modifiers:
 - `.describe(text)` sets the description.
 - `.set_examples([(name, oas::Example)])` adds documented examples.
 - `.encoding(field, EncodingItem)` documents the encoding of a field (form bodies only).
+- `.require_headers::<H>()` documents response headers (responses only).
 
 ### 6.1 Parsing is driven by the request's `Content-Type`
 
 As in Linz, the body is parsed according to the `Content-Type` **the client sent**, not the
 kind you declared. A `JsonBody` endpoint that receives a url-encoded body gets an object of
-strings, which is coerced and then validated against the same schema. The supported request
-content types are `application/json`, `application/x-www-form-urlencoded`,
-`multipart/form-data` and `application/octet-stream`. Any other content type with a non-empty
-body responds `415`, even on endpoints that declare no body.
+strings, which is coerced and then validated against the same schema.
 
-Charsets: `utf-8` (the default, invalid bytes are replaced), and `us-ascii`/`ascii`/`latin1`/
-`iso-8859-1`/`binary`. Any other charset responds `400 Unknown encoding: <name>`.
-
-`text/plain` and `text/html` request bodies are not parsed, so they respond `415`. Use those
-kinds for responses.
+- **Supported request content types**: `application/json`, `application/x-www-form-urlencoded`,
+  `multipart/form-data` and `application/octet-stream`.
+- **Any other content type** with a non-empty body responds `415`, even on endpoints that
+  declare no body.
+- **Charsets**: `utf-8` (the default; invalid bytes are replaced), and
+  `us-ascii`/`ascii`/`latin1`/`iso-8859-1`/`binary`. Any other charset responds
+  `400 Unknown encoding: <name>`.
+- **`text/plain` and `text/html` request bodies** are not parsed, so they respond `415`. Use
+  those kinds for responses.
 
 ### 6.2 Optional and empty bodies
 
@@ -434,13 +455,13 @@ pub struct File {
 }
 ```
 
-- In `FormDataBody`, a part with a `filename` is a file. Declare that field as `File`
-  (`Vec<File>` with `multi_value_form_data`). A text part sent for a `File` field responds
-  `400`.
+- In `FormDataBody`, a part with a `filename` is a file. Declare that field as `File`. A text
+  part sent for a `File` field responds `400`.
 - In `OctetStreamBody`, the whole body is one `File` with `name: None`.
 - In the docs, `File` is documented as `{"type":"string","format":"binary","contentMediaType":"application/octet-stream"}`.
-- `File` can only be (de)serialized inside form-data and octet-stream bodies. Returning it in
-  a `JsonBody` response fails serialization and responds `500`.
+- `File` can only be (de)serialized inside form-data and octet-stream bodies. Returning it in a
+  `JsonBody` response fails serialization and responds `500`.
+- `File::new(data)`, `.with_name(..)` and `.with_content_type(..)` build one for responses.
 
 ```rust
 #[derive(Deserialize, JsonSchema)]
@@ -460,11 +481,10 @@ Endpoint::new("uploadAvatar")
 `EncodingItem` has the builder methods `.content_type(iter)`, `.headers::<H>()`, `.style(s)`,
 `.explode(bool)` and `.allow_reserved(bool)`. They only affect the documentation.
 
-### 6.4 Multiple values in forms
+### 6.4 Repeated form fields
 
-By default, when a field name repeats in a url-encoded or multipart body, the last value wins.
-Set `RequestConfig::multi_value_url_encoded` / `multi_value_form_data` to receive **every**
-field as an array instead.
+When a field name repeats in a url-encoded or multipart body, the **last** value wins. The
+same applies to query strings and cookies.
 
 ---
 
@@ -472,47 +492,41 @@ field as an array instead.
 
 ### 7.1 Declaring responses
 
-`.response(status, spec)` accepts:
+```rust
+Endpoint::new("getUser")
+    .returns(200, JsonBody::new::<User>())        // main response: R = User
+    .response(203, JsonBody::new::<User>())       // another body of type R
+    .response(404, true)                          // JSON:API error, reason phrase as description
+    .response(409, "The username is taken")       // JSON:API error with a description
+    .default_response(JsonBody::new::<User>())    // statuses without their own declaration
+```
 
-| `spec` | Meaning | At runtime |
-| --- | --- | --- |
-| a `SenderBody<T>` | A success (or custom) response with a body schema. | The handler's value is validated against `T`'s schema and encoded with the body kind. |
-| `true` | A JSON:API error response (`description` = the reason phrase). | Documentation only. Produce it with `Err(ApiError)`. |
-| `"text"` / `String` | A JSON:API error response with that description. | Same as `true`. |
+| Declaration | At runtime |
+| --- | --- |
+| `.returns(status, SenderBody<R>)` / `.response(status, SenderBody<R>)` | The handler's value is validated against the schema of `R` and encoded with the body kind. |
+| `.response(status, true)` / `.response(status, "text")` | Documentation only. Produce these responses with `Err(ApiError)`. |
+| `.returns_default(..)` / `.default_response(..)` | Used when the status has no declaration. Documented under the `default` key. |
 
-`.default_response(SenderBody<T>)` declares the response for statuses without their own
-declaration. It is documented under the `default` key.
-
-`JsonBody::new::<()>()` is a **void** response. It has no body and no `Content-Type`, and is
-documented without a schema.
+`JsonBody::new::<()>()` is a **void** response type. It has no body and no `Content-Type`,
+and is documented without a schema.
 
 ### 7.2 Status selection and validation
 
-1. The status is `HttpResponse::status`. When it is unset, the status is `201 Created` for
-   `post` endpoints and `200 OK` for all others.
-2. The declaration for that status is looked up, falling back to `.default_response`.
-3. If that declaration is missing, or is `true`/a description, the response is
-   `500 Internal server error` and the logger records
+1. **Choose the status.** The status is `HttpResponse::status`. When it is unset, the status is
+   `201 Created` for `post` endpoints and `200 OK` for all others.
+2. **Find the declaration** for that status, falling back to the default response.
+3. **No usable declaration.** If the declaration is missing, or is `true`/a description, the
+   response is `500 Internal server error` and the logger records
    `There is no corresponding validator defined in schema for status N/default`.
-4. A stream body (`HttpResponse::stream`) is sent as is, with no validation and no
+4. **Streams.** A stream body (`HttpResponse::stream`) is sent as is, with no validation and no
    `Content-Type`.
-5. Otherwise the value is serialized with serde and validated against the schema of the
-   **declared** type (not against `R`). A mismatch responds `500 Internal server error` and
-   logs `Invalid output format to the corresponding defined output schema` followed by the
+5. **Validate the value.** The value is serialized with serde and validated against the
+   declared schema. A violated constraint responds `500 Internal server error` and logs
+   `Invalid output format to the corresponding defined output schema` followed by the
    validation errors.
-6. The value is encoded by the body kind. `Content-Type` is the kind's MIME type (multipart
+6. **Encode the body** by the body kind. `Content-Type` is the kind's MIME type (multipart
    responses include a boundary), and then your headers are applied. A header you set replaces
    every value of that header name.
-
-Body handling rules:
-
-| Handler returns | Declared type | Result |
-| --- | --- | --- |
-| `HttpResponse::without_body(..)` | `()` (void) or `Option<T>` | Empty body. |
-| `HttpResponse::without_body(..)` | any other type | `500` (output validation fails). |
-| `()` / `null` | `()` | Empty body. |
-| a value other than `null` | `()` | `500`. |
-| `None` (serializes to `null`) | `Option<T>` | Empty body. |
 
 ### 7.3 `HttpResponse`
 
@@ -525,9 +539,19 @@ HttpResponse::stream(StatusCode::OK, axum::body::Body::from_stream(stream))
     .header(header::LOCATION, HeaderValue::from_static("/users/2"))
 ```
 
-The fields (`status`, `headers`, `body: ResponseBody<T>`) are public, too.
+The fields (`status`, `headers`, `body: ResponseBody<T>`) are public, too. `HttpResponse<R>`
+implements `From<R>`, which is why handlers can return `Ok(value)` directly.
 
-### 7.4 Encoding per kind
+### 7.4 Empty and optional bodies
+
+| Handler returns | Response type `R` | Result |
+| --- | --- | --- |
+| `Ok(())` or `HttpResponse::without_body(..)` | `()` | Empty body, no `Content-Type`. |
+| `HttpResponse::without_body(..)` | `Option<T>` | Empty body. |
+| `Ok(None)` | `Option<T>` | Empty body. |
+| `HttpResponse::without_body(..)` | any other type | `500` (output validation fails). |
+
+### 7.5 Encoding per kind
 
 | Kind | Expected value | Encoding |
 | --- | --- | --- |
@@ -537,11 +561,13 @@ The fields (`status`, `headers`, `body: ResponseBody<T>`) are public, too.
 | `FormDataBody` | an object | one part per field (arrays repeat parts). `File` fields become file parts, with the field name as the default filename. |
 | `OctetStreamBody` | a `File` (or a string) | the raw bytes |
 
-### 7.5 Multiple bodies for one endpoint
+### 7.6 Different shapes for different statuses
 
-`R` is a single type, but each status validates against its own declared schema. To return
-different shapes, make `R` an `#[serde(untagged)]` enum or `serde_json::Value` (see
-[13.6](#136-return-different-bodies-for-different-statuses)).
+`R` is one type, so different shapes are expressed with an enum (see
+[13.6](#136-return-different-bodies-for-different-statuses)). For an
+`#[serde(untagged)]` enum, the docs show its schema (`anyOf` of the variants) at each status
+that declares it, and every status accepts any variant. Use `serde_json::Value` as `R` to opt
+out of typing entirely.
 
 ---
 
@@ -581,7 +607,7 @@ collected together, in the order body, queries, params, headers, cookies. The re
 ```json
 {
   "errors": [
-    { "meta": { "in": "body", "result": [ { "path": ["age"], "message": "12 is less than the minimum of 18.0" } ] } },
+    { "meta": { "in": "body", "result": [ { "path": ["age"], "message": "12 is less than the minimum of 18" } ] } },
     { "meta": { "in": "params", "result": [ { "path": ["user_id"], "message": "\"abc\" is not of type \"integer\"" } ] } }
   ]
 }
@@ -634,6 +660,8 @@ A handler receives `Credentials`:
 - `method`, `uri`, `headers`: from the raw request.
 
 The handler returns `Ok(Extensions)` to continue, or `Err(ApiError)` to respond with that error.
+Security handlers do not receive the router state. Capture what they need, such as a database
+pool, in the closure.
 
 ### 9.2 Token extraction
 
@@ -654,8 +682,8 @@ For `Http` with `Basic`, the token is the base64 credentials. Decode them yourse
 let auth = bearer_auth();
 
 Endpoint::new("deleteUser")
-    .security(auth.apply(["users:write"]))   // scopes
-    .security(api_key.apply(Vec::<String>::new())) // no scopes
+    .security(auth.apply(["users:write"]))       // with scopes
+    .security(api_key.apply(Vec::<String>::new())) // without scopes
 ```
 
 - Securities run **sequentially, in order, and all of them must succeed**.
@@ -735,33 +763,68 @@ let router = merge_endpoint_groups("/v1", vec![users_controller(), posts_control
 - It returns `Err("Duplicated keys occured: ...")` when two endpoints end up with the same key.
 - It can be nested: merge controllers into a version group, then merge versions.
 
+Both functions are generic over the state type `S`. All groups merged together must use the
+same `S`.
+
 ---
 
 ## 11. OpenAPI document and docs viewer
 
-### 11.1 `build_json`
+### 11.1 `BuilderConfig`
 
 ```rust
-let mut config = BuilderConfig::new(info, &endpoints); // openapi = "3.1.0"
-config.openapi = "3.1.1".into();
-config.servers = vec![oas::Server {
+let mut spec = BuilderConfig::new("My API", "1.0.0"); // OpenAPI 3.1.0
+spec.info.description = Some("Everything about users".into());
+spec.openapi = "3.1.1".into();
+spec.servers = vec![oas::Server {
     url: "https://api.example.com".into(),
     description: Some("Production".into()),
     variables: Default::default(),
 }];
-config.external_docs = None;
-config.webhooks = None; // raw JSON (serde_json::Value)
-config.json_schema_dialect = None; // defaults to JSON_SCHEMA_DIALECTS[0]
-config.additional_schemas = vec![("webhook event".into(), TypeSchema::of::<WebhookEvent>())];
-
-let spec: serde_json::Value = build_json(&config)?;
+spec.external_docs = None;
+spec.webhooks = None;            // raw JSON (serde_json::Value)
+spec.json_schema_dialect = None; // defaults to JSON_SCHEMA_DIALECTS[0]
+spec.additional_schemas = vec![("webhook event".into(), TypeSchema::of::<WebhookEvent>())];
 ```
 
-`build_json` borrows the endpoints, so build the spec **before** passing the group to
-`create_api`, which consumes it. `LinzEndpoint` is cheap to `clone()` (its handler is an `Arc`)
-if you need the group twice.
+`BuilderConfig::with_info(oas::Info { .. })` takes a complete info object instead.
 
-### 11.2 What is generated
+### 11.2 Serving the docs
+
+Pass the `BuilderConfig` in `CreateApiConfig::docs`. `create_api` builds the document from the
+endpoints it registers:
+
+```rust
+DocsConfig {
+    viewer: DocsViewer::Swagger, // Scalar | Swagger | Redoc | Rapidoc | SpotlightElements
+    spec: BuilderConfig::new("My API", "1.0.0"),
+    docs_path: "/docs".into(),
+    spec_path: "/openapi.json".into(),
+    theme: Some("monokai".into()),
+}
+```
+
+- `GET spec_path` serves the document with `Content-Type: application/json`.
+- `GET docs_path` serves the viewer HTML. Its title is `spec.info.title`.
+- `theme` is used by Scalar (a theme name such as `purple`, the default) and Swagger (the
+  syntax-highlighting theme, default `classic`). The other viewers ignore it.
+- The viewer pages load their scripts from public CDNs (unpkg, jsDelivr, cdn.redoc.ly). Browsers
+  without internet access, or pages with a strict Content-Security-Policy, will not render
+  them.
+
+### 11.3 Building the document yourself
+
+`build_json(&config, &endpoints)` returns the document as a `serde_json::Value`, for example to
+write it to a file in CI or to generate clients. It borrows the endpoints, so call it before
+handing them to `create_api`. `LinzEndpoint` is cheap to `clone()` (its handler is an `Arc`).
+
+```rust
+let endpoints = endpoints();
+let document = build_json(&BuilderConfig::new("My API", "1.0.0"), &endpoints)?;
+std::fs::write("openapi.json", serde_json::to_string_pretty(&document)?)?;
+```
+
+### 11.4 What is generated
 
 For every endpoint that is not hidden:
 
@@ -787,57 +850,40 @@ Schema components:
 | Component | Content |
 | --- | --- |
 | `{Op}RequestBody` | The request body (`Op` is the operation ID in PascalCase, e.g. `getUser` → `GetUser`). |
-| `{Op}Response` | The response body when the endpoint has one. With several, they are named `{Op}Response{Status}` / `{Op}ResponseDefault`. |
+| `{Op}Response` | The response body. When several statuses declare a body, they are named `{Op}Response{Status}` / `{Op}ResponseDefault`. |
 | `JsonApiError`, `JsonApiErrorItem`, `JsonApiErrorLinks`, `JsonApiErrorSource` | The error format. |
 | `additional_schemas` | Named in PascalCase. |
 | Nested types | Every type referenced by the above, named by `JsonSchema::schema_name()`. |
 
-Void bodies and octet-stream bodies have no schema component.
-
-Schemas are converted to JSON Schema 2020-12 conventions. For example, tuples use
-`prefixItems`.
-
-### 11.3 Serving the docs
-
-Set `CreateApiConfig::docs`:
-
-```rust
-DocsConfig {
-    viewer: DocsViewer::Swagger, // Scalar | Swagger | Redoc | Rapidoc | SpotlightElements
-    spec,
-    docs_path: "/docs".into(),
-    spec_path: "/openapi.json".into(),
-    theme: Some("monokai".into()),
-}
-```
-
-- `GET spec_path` serves the spec with `Content-Type: application/json`.
-- `GET docs_path` serves the viewer HTML. Its title is `spec.info.title`.
-- `theme` is used by Scalar (a theme name such as `purple`, the default) and Swagger (the
-  syntax-highlighting theme, default `classic`). The other viewers ignore it.
-- The viewer pages load their scripts from public CDNs (unpkg, jsDelivr, cdn.redoc.ly). Browsers
-  without internet access, or pages with a strict Content-Security-Policy, will not render
-  them.
+Void bodies and octet-stream bodies have no schema component. Schemas use JSON Schema 2020-12
+(for example, tuples use `prefixItems`), as OpenAPI 3.1 expects.
 
 ---
 
-## 12. `create_api` configuration
+## 12. `create_api` configuration and state
 
 ```rust
-pub fn create_api<S>(app: Router<S>, endpoints: LinzEndpointGroup, config: CreateApiConfig)
+pub fn create_api<S>(app: Router<S>, endpoints: LinzEndpointGroup<S>, config: CreateApiConfig)
     -> Result<Router<S>, String>
+where
+    S: Clone + Send + Sync + 'static
 ```
 
-`create_api` returns `Err` for an invalid key or method, a duplicate operation ID, or a
-duplicate method and path (including clashes with the docs routes). See [17.3](#173-registration-errors).
+`create_api` returns `Err` for:
+
+- an invalid key or method;
+- a duplicate operation ID;
+- a duplicate method and path, including clashes with the docs routes;
+- a failure to build the OpenAPI document.
+
+See [17.3](#173-registration-errors) for the messages.
 
 ### 12.1 `CreateApiConfig`
 
 | Field | Default | Description |
 | --- | --- | --- |
 | `cors` | `None` | `Some(CorsConfig::Permissive)` allows any origin, the methods `GET, HEAD, PUT, PATCH, POST, DELETE`, and mirrors the requested headers. `Some(CorsConfig::Custom(tower_http::cors::CorsLayer))` uses your own layer. |
-| `docs` | `None` | See [11.3](#113-serving-the-docs). |
-| `request` | all `false` | `RequestConfig { multi_value_query_string, multi_value_form_data, multi_value_url_encoded }` |
+| `docs` | `None` | See [11.2](#112-serving-the-docs). |
 | `logger` | `None` | `Arc<dyn Logger>` (see [12.2](#122-logger)). |
 | `fallback_handler` | `None` | Called for unmatched requests. Return `Some(response)` to handle the request, or `None` to fall through to the 404. |
 
@@ -850,21 +896,73 @@ duplicate method and path (including clashes with the docs routes). See [17.3](#
 - `error`: missing response declarations, invalid outputs (with the validation errors as
   JSON), and internal errors.
 
-### 12.3 Router behavior
+### 12.3 State
+
+Handlers receive the router state as `ctx.state`, the same state axum provides with
+`Router::with_state`:
+
+```rust
+#[derive(Clone)]
+struct AppState {
+    db: Arc<Database>,
+}
+
+fn get_user() -> LinzEndpoint<AppState> {
+    Endpoint::new("getUser")
+        .path::<IdPath>()
+        .returns(200, JsonBody::new::<User>())
+        .response(404, true)
+        .handler(|req, ctx: Context<AppState>| async move {
+            ctx.state
+                .db
+                .find_user(req.params.id)
+                .await
+                .ok_or_else(|| ApiError::detail(StatusCode::NOT_FOUND, "User not found"))
+        })
+}
+
+let app: Router = create_api(Router::new(), vec![("get:/users/:id".into(), get_user())], config)?
+    .with_state(AppState { db });
+```
+
+How the state type flows:
+
+- **Annotate the context** when a handler reads the state: `ctx: Context<AppState>`. Rust cannot
+  infer `S` for a closure from the function's return type. axum handlers have the same
+  requirement with `State<AppState>`.
+- **Handlers that do not read the state** need no annotation. Their `S` is inferred from where
+  the endpoint is used.
+- **Every endpoint passed to one `create_api` call has the same `S`.** A function returning
+  `LinzEndpointGroup` (that is, `S = ()`) cannot be mixed with `LinzEndpointGroup<AppState>`.
+  Write reusable, state-independent groups generically:
+
+```rust
+fn health<S: Clone + Send + Sync + 'static>() -> LinzEndpointGroup<S> {
+    vec![(
+        "get:/health".into(),
+        Endpoint::new("health")
+            .returns(200, TextBody::new())
+            .handler(|_, _| async move { Ok("ok".to_string()) }),
+    )]
+}
+```
+
+`create_api` returns `Router<S>`. Call `.with_state(state)` on it before serving.
+
+### 12.4 Router behavior
 
 - **Unmatched routes**: `404 {"errors":[{"detail":"Cannot find GET /path"}]}`. A request to an
   existing path with an unregistered method also gets this `404`, not a `405`.
 - **Fallback**: `create_api` **sets** the router's fallback, replacing any fallback `app` had.
 - **CORS**: the layer wraps the **whole** router, including routes that were already on `app`.
-- **State**: `create_api` works for any `Router<S>`. Endpoint handlers do not receive axum
-  state; capture what they need instead (see [13.10](#1310-share-state-database-pools-config)).
 
 ---
 
 ## 13. How-to recipes
 
 The snippets assume `use linz_rs::*;`, `use http::{header, HeaderValue, StatusCode};`,
-`use schemars::JsonSchema;` and `use serde::{Deserialize, Serialize};`.
+`use std::sync::Arc;`, `use schemars::JsonSchema;` and
+`use serde::{Deserialize, Serialize};`.
 
 ### 13.1 Build a CRUD resource
 
@@ -896,14 +994,14 @@ fn todos() -> LinzEndpointGroup {
     vec![
         ("get:/todos".into(), Endpoint::new("listTodos")
             .query::<ListQuery>()
-            .response(200, JsonBody::new::<Vec<Todo>>())
+            .returns(200, JsonBody::new::<Vec<Todo>>())
             .handler(|req, _| async move {
                 let _ = (req.queries.offset, req.queries.limit);
-                Ok(Vec::<Todo>::new().into())
+                Ok(Vec::new())
             })),
         ("post:/todos".into(), Endpoint::new("createTodo")
             .request_body(JsonBody::new::<TodoInput>())
-            .response(201, JsonBody::new::<Todo>())
+            .returns(201, JsonBody::new::<Todo>())
             .handler(|req, _| async move {
                 let todo = Todo { id: 1, title: req.body.title, done: req.body.done.unwrap_or(false) };
                 Ok(HttpResponse::new(todo)
@@ -912,17 +1010,17 @@ fn todos() -> LinzEndpointGroup {
         ("put:/todos/:id".into(), Endpoint::new("updateTodo")
             .path::<IdPath>()
             .request_body(JsonBody::new::<TodoInput>())
-            .response(200, JsonBody::new::<Todo>())
+            .returns(200, JsonBody::new::<Todo>())
             .response(404, true)
             .handler(|req, _| async move {
-                Ok(Todo { id: req.params.id, title: req.body.title, done: req.body.done.unwrap_or(false) }.into())
+                Ok(Todo { id: req.params.id, title: req.body.title, done: req.body.done.unwrap_or(false) })
             })),
         ("delete:/todos/:id".into(), Endpoint::new("deleteTodo")
             .path::<IdPath>()
-            .response(204, JsonBody::new::<()>())
+            .returns(204, JsonBody::new::<()>())
             .response(404, true)
             .handler(|_req, _| async move {
-                Ok(HttpResponse::<()>::without_body(StatusCode::NO_CONTENT, None))
+                Ok(HttpResponse::without_body(StatusCode::NO_CONTENT, None))
             })),
     ]
 }
@@ -958,10 +1056,10 @@ struct Uploaded { name: Option<String>, size: usize }
 
 Endpoint::new("upload")
     .request_body(FormDataBody::new::<Upload>())
-    .response(201, JsonBody::new::<Uploaded>())
+    .returns(201, JsonBody::new::<Uploaded>())
     .handler(|req, _| async move {
         let file = req.body.file; // name, content_type, data: Bytes
-        Ok(Uploaded { name: file.name, size: file.data.len() }.into())
+        Ok(Uploaded { name: file.name, size: file.data.len() })
     })
 ```
 
@@ -972,7 +1070,7 @@ To accept a raw binary body instead, use `.request_body(OctetStreamBody::new())`
 
 ```rust
 Endpoint::new("download")
-    .response(200, OctetStreamBody::new())
+    .returns(200, OctetStreamBody::new())
     .handler(|_, _| async move {
         let data = std::fs::read("report.pdf")
             .map_err(|e| ApiError::detail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
@@ -985,12 +1083,12 @@ For large payloads, stream the body instead of buffering it. The status still ne
 declaration, and the stream itself is not validated:
 
 ```rust
-.response(200, OctetStreamBody::new())
+.returns(200, OctetStreamBody::new())
 .handler(|_, _| async move {
     let file = tokio::fs::File::open("big.bin").await
         .map_err(|e| ApiError::detail(StatusCode::NOT_FOUND, e.to_string()))?;
     let stream = tokio_util::io::ReaderStream::new(file); // tokio-util crate
-    Ok(HttpResponse::<File>::stream(StatusCode::OK, axum::body::Body::from_stream(stream))
+    Ok(HttpResponse::stream(StatusCode::OK, axum::body::Body::from_stream(stream))
         .header(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")))
 })
 ```
@@ -999,8 +1097,8 @@ declaration, and the stream itself is not validated:
 
 ```rust
 Endpoint::new("robots")
-    .response(200, TextBody::new())
-    .handler(|_, _| async move { Ok("User-agent: *\nDisallow:".to_string().into()) })
+    .returns(200, TextBody::new())
+    .handler(|_, _| async move { Ok("User-agent: *\nDisallow:".to_string()) })
 ```
 
 ### 13.6 Return different bodies for different statuses
@@ -1008,16 +1106,17 @@ Endpoint::new("robots")
 ```rust
 #[derive(Serialize, JsonSchema)]
 struct Done { id: u64 }
+
 #[derive(Serialize, JsonSchema)]
 struct Queued { job: String }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 #[serde(untagged)]
 enum Outcome { Done(Done), Queued(Queued) }
 
 Endpoint::new("process")
-    .response(200, JsonBody::new::<Done>())
-    .response(202, JsonBody::new::<Queued>())
+    .returns(200, JsonBody::new::<Outcome>())
+    .response(202, JsonBody::new::<Outcome>())
     .handler(|_, _| async move {
         if quick() {
             Ok(HttpResponse::with_status(StatusCode::OK, Outcome::Done(Done { id: 1 })))
@@ -1027,8 +1126,8 @@ Endpoint::new("process")
     })
 ```
 
-Each status is validated against its own declaration, so returning `Queued` with status `200`
-responds `500`.
+The docs show `anyOf [Done, Queued]` for both statuses. If you need each status documented with
+exactly one shape, split the operation, or use `serde_json::Value` with your own discipline.
 
 ### 13.7 Protect endpoints with an API key
 
@@ -1072,25 +1171,26 @@ Hidden endpoints still respond. Protect them with security if they must not be p
 
 ### 13.10 Share state (database pools, config)
 
-Handlers do not receive axum `State`. Capture an `Arc` (or any cheap-to-clone handle) instead:
+Use `Context<S>` (see [12.3](#123-state)):
 
 ```rust
 #[derive(Clone)]
-struct AppState { db: Arc<Database> }
+struct AppState { db: Arc<Database>, config: Arc<Config> }
 
-fn get_user(state: AppState) -> LinzEndpoint {
-    Endpoint::new("getUser")
-        .path::<IdPath>()
-        .response(200, JsonBody::new::<User>())
-        .handler(move |req, _| {
-            let state = state.clone(); // the handler is Fn: clone per call
-            async move {
-                let user = state.db.find(req.params.id).await
-                    .ok_or_else(|| ApiError::detail(StatusCode::NOT_FOUND, "User not found"))?;
-                Ok(user.into())
-            }
-        })
+fn routes() -> LinzEndpointGroup<AppState> {
+    vec![(
+        "get:/users/:id".into(),
+        Endpoint::new("getUser")
+            .path::<IdPath>()
+            .returns(200, JsonBody::new::<User>())
+            .handler(|req, ctx: Context<AppState>| async move {
+                ctx.state.db.find_user(req.params.id).await
+                    .ok_or_else(|| ApiError::detail(StatusCode::NOT_FOUND, "User not found"))
+            }),
+    )]
 }
+
+let app = create_api(Router::new(), routes(), config)?.with_state(AppState { db, config: cfg });
 ```
 
 ### 13.11 Mix with plain axum routes and middleware
@@ -1098,7 +1198,7 @@ fn get_user(state: AppState) -> LinzEndpoint {
 ```rust
 use axum::routing::get;
 
-let app = Router::new().route("/health", get(|| async { "ok" })); // add plain routes first
+let app = Router::new().route("/metrics", get(metrics)); // add plain routes first
 let app = create_api(app, endpoints, config)?
     .layer(tower_http::limit::RequestBodyLimitLayer::new(10 * 1024 * 1024)) // tower-http "limit" feature
     .layer(tower_http::catch_panic::CatchPanicLayer::new());              // tower-http "catch-panic" feature
@@ -1155,7 +1255,7 @@ struct RateLimitHeaders {
     remaining: u32,
 }
 
-.response(
+.returns(
     200,
     JsonBody::new::<User>()
         .describe("The user")
@@ -1172,14 +1272,18 @@ struct RateLimitHeaders {
 
 These calls only affect the documentation. Response headers are not validated.
 
-### 13.15 Publish extra schemas
+### 13.15 Publish extra schemas and export the document
 
 ```rust
 #[derive(JsonSchema)]
 struct WebhookEvent { kind: String, payload: serde_json::Value }
 
-config.additional_schemas = vec![("webhook event".into(), TypeSchema::of::<WebhookEvent>())];
+let mut spec = BuilderConfig::new("My API", "1.0.0");
+spec.additional_schemas = vec![("webhook event".into(), TypeSchema::of::<WebhookEvent>())];
 // -> components.schemas.WebhookEvent
+
+let endpoints = endpoints();
+std::fs::write("openapi.json", serde_json::to_string_pretty(&build_json(&spec, &endpoints)?)?)?;
 ```
 
 ### 13.16 Test endpoints without a server
@@ -1208,7 +1312,8 @@ async fn creates_users() {
 }
 ```
 
-`tests/api.rs` in this repository has many more examples.
+For a stateful app, call `.with_state(..)` on the router before `oneshot`. `tests/api.rs` in this
+repository has many more examples.
 
 ---
 
@@ -1222,14 +1327,15 @@ For every request that matches an endpoint:
 3. **Authenticate**: each applied security runs in order. The first failure responds with its
    error. Returned extensions are merged.
 4. **Gather the parameters**: query string, path parameters, headers and cookies are converted
-   to JSON.
+   to JSON. Repeated keys keep their last value.
 5. **Validate** every declared part (body, queries, params, headers, cookies). Textual parts are
    coerced first. Any issue responds `400` with all issues.
-6. **Call the handler** with `Request` and `Context`. `Err(ApiError)` is rendered as is.
+6. **Call the handler** with `Request` and `Context` (including the state). `Err(ApiError)` is
+   rendered as is.
 7. **Choose the status** (explicit, or 201 for `post` and 200 otherwise) and find its
    declaration, falling back to `default`. If there is none, the response is `500`.
-8. **Validate the output** against the declared schema. A mismatch responds `500`. Streams
-   skip this step.
+8. **Validate the output** against the declared schema. A constraint violation responds `500`.
+   Streams skip this step.
 9. **Encode the body** by the declared kind, set `Content-Type`, and apply the handler's
    headers.
 
@@ -1240,10 +1346,18 @@ preflight requests are answered by the CORS layer before routing.
 
 ## 15. Notes, gotchas and limitations
 
+**Typing**
+
+- The handler's response type is checked at compile time against `.returns`. Response
+  constraints (`range`, `length`, formats) and undeclared statuses are still checked at
+  runtime, so cover them with tests.
+- Handlers that only return errors need the success type spelled out: `Err::<User, _>(..)`.
+- Handlers that read `ctx.state` need `ctx: Context<AppState>` (see [12.3](#123-state)).
+- The status of an `ApiError` does not need to be declared.
+
 **Validation and schemas**
 
-- `format` keywords (`email`, `uri`, `uuid`, `date-time`, ...) are **not** validated. Use
-  `regex`.
+- Validation uses JSON Schema 2020-12 with format validation on. Unknown formats are ignored.
 - Unknown fields are accepted unless the type has `#[serde(deny_unknown_fields)]`.
 - `Option<T>` fields are documented as nullable (`type: [T, "null"]`) because they accept
   `null`. Rust cannot express Zod's distinction between optional and nullable.
@@ -1260,7 +1374,8 @@ preflight requests are answered by the CORS layer before routing.
   `tower_http::limit::RequestBodyLimitLayer`.
 - The body is parsed even for endpoints that declare no body. A non-empty body with an
   unsupported content type responds `415`, as in Linz.
-- In multi-value query mode, every query field must be a sequence.
+- Repeated query, form and cookie keys keep only their last value. There is no multi-value
+  mode.
 - Header DTO fields must use the lower-case header names.
 - Only `get`, `post`, `put`, `patch` and `delete` endpoints are supported. `HEAD` and `OPTIONS`
   are not routed to endpoints (CORS preflight is handled by the CORS layer).
@@ -1271,9 +1386,6 @@ preflight requests are answered by the CORS layer before routing.
 
 - `true`/description responses are documentation only. Returning `Ok(..)` with such a status
   responds `500`. Use `Err(ApiError)` for them.
-- The handler's type `R` is not checked against the declarations at compile time. Mismatches are
-  caught at runtime and respond `500`, so cover them with tests.
-- An `ApiError`'s status does not need to be declared.
 - `File` works only in form-data and octet-stream bodies.
 
 **Security**
@@ -1281,6 +1393,7 @@ preflight requests are answered by the CORS layer before routing.
 - Multiple securities on one endpoint are **all required** at runtime, but the OpenAPI document
   lists them as alternatives (separate requirement objects, which means OR). This matches Linz.
   If you need "any of", implement it inside one security handler.
+- Security handlers do not receive the router state. Capture what they need in the closure.
 - Error responses from security handlers are not limited to 401. Return any status (for example
   403 for missing scopes).
 
@@ -1295,24 +1408,26 @@ preflight requests are answered by the CORS layer before routing.
 
 | Area | Linz | linz-rs |
 | --- | --- | --- |
-| Schemas | Zod | schemars (`JsonSchema`) plus jsonschema validation |
+| Schemas | Zod | schemars 1.x (`JsonSchema`) plus jsonschema validation (draft 2020-12, formats on) |
 | Endpoint declaration | `endpoint({...})` object | `Endpoint::new(id)` builder, finished by `.handler(f)` |
-| Endpoint groups | object `{ "get:/x": endpoint }` | `Vec<(String, LinzEndpoint)>` |
-| Handler result | the body or an `HttpResponse`; throw `ApiError` | `Result<HttpResponse<R>, ApiError>`. `HttpResponse<R>: From<R>` |
-| Handler context | `{ extensions, req, res, security }` | `Context { extensions, request: Parts, security }`. Streaming replaces writing to `res`. |
+| Endpoint groups | object `{ "get:/x": endpoint }` | `Vec<(String, LinzEndpoint<S>)>` |
+| Response typing | inferred from `responses` | `R` set by `.returns(..)`. Every body response is `SenderBody<R>`. |
+| Handler result | the body or an `HttpResponse`; throw `ApiError` | `Result<R or HttpResponse<R>, ApiError>` |
+| Handler context | `{ extensions, req, res, security }` | `Context { state, extensions, request: Parts, security }`. Streaming replaces writing to `res`. |
+| State | none (module scope) | the axum router state, as `ctx.state` |
 | Security handler | `(req, scopes, extensions) => Promise<void>` that throws | `Fn(Credentials) -> Future<Result<Extensions, ApiError>>`, with the token extracted for you |
 | Coercion | only with `z.coerce` | automatic for textual inputs, guided by the schema |
+| Multi-value query/form options | `multiValueQueryString` (the form options were never applied) | removed; the last occurrence always wins |
+| OpenAPI document | `buildJson(...)` passed to `createApi` | built by `create_api` from `DocsConfig::spec`; `build_json` remains for exports |
 | Path params | `:name` | `:name` or `{name}` |
 | Method mismatch | 404 | 404 (same) |
-| `multiValueFormData` / `multiValueUrlEncoded` | accepted but never passed to the parser | honored |
 | Multipart response encoding | missing CRLF after each boundary | well-formed |
 | Response schema names | one `{Op}Response` shared by all statuses (the last one wins) | `{Op}Response`, or `{Op}Response{Status}` when there are several |
-| `servers` in `buildJson` | accepted but not emitted | emitted |
+| `servers` | accepted but not emitted | emitted |
 | Response headers and examples in the docs | not emitted | emitted |
 | Encoding headers in the docs | raw property schemas | proper header objects |
 | `default` response description | `"undefined"` | `"Default response"` |
 | A user body declared at 400/401/500 | overwritten by `JsonApiError` | kept |
-| Tuples in the docs | `prefixItems` | `prefixItems` |
 | Optional vs nullable | distinct | both nullable (see [15](#15-notes-gotchas-and-limitations)) |
 
 ---

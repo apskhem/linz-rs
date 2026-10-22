@@ -5,10 +5,7 @@ use std::sync::{
     RwLock,
 };
 
-use schemars::gen::{
-    SchemaGenerator,
-    SchemaSettings,
-};
+use schemars::generate::SchemaSettings;
 use schemars::JsonSchema;
 use serde_json::Value;
 
@@ -20,8 +17,8 @@ pub(crate) struct CompiledSchema {
 
 /// Settings for schemas that are embedded into an OpenAPI 3.1 document.
 pub(crate) fn docs_settings() -> SchemaSettings {
-    let mut settings = SchemaSettings::draft2019_09();
-    settings.definitions_path = "#/components/schemas/".into();
+    let mut settings = SchemaSettings::draft2020_12();
+    settings.definitions_path = "/components/schemas".into();
     settings.meta_schema = None;
     settings
 }
@@ -37,9 +34,13 @@ pub(crate) fn compiled<T: JsonSchema + ?Sized + 'static>() -> &'static CompiledS
         return schema;
     }
 
-    let root = SchemaGenerator::new(SchemaSettings::draft2019_09()).into_root_schema_for::<T>();
-    let root = serde_json::to_value(root).expect("JSON schema should be serializable");
-    let validator = jsonschema::validator_for(&root)
+    let root = SchemaSettings::draft2020_12()
+        .into_generator()
+        .into_root_schema_for::<T>()
+        .to_value();
+    let validator = jsonschema::options()
+        .should_validate_formats(true)
+        .build(&root)
         .unwrap_or_else(|err| panic!("invalid JSON schema generated for `{}`: {err}", T::schema_name()));
     let compiled: &'static CompiledSchema = Box::leak(Box::new(CompiledSchema { root, validator }));
 
@@ -52,7 +53,8 @@ pub(crate) fn compiled<T: JsonSchema + ?Sized + 'static>() -> &'static CompiledS
 
 /// Converts string values into numbers, integers, booleans or null wherever the schema
 /// does not accept a string but accepts one of those types. Used for inputs that are
-/// always textual, e.g. query strings, path parameters, headers, cookies and form data.
+/// always textual, i.e. query strings, path parameters, headers, cookies and form data,
+/// whose values are strings within a (possibly nested) object.
 pub(crate) fn coerce(value: &mut Value, root: &Value) {
     coerce_with(value, root, root, 0);
 }
@@ -130,23 +132,6 @@ fn coerce_with(value: &mut Value, schema: &Value, root: &Value, depth: usize) {
                 }
             }
         }
-        Value::Array(items) => {
-            let item_schemas: Vec<&Value> = schemas.iter().filter_map(|s| s.get("items")).collect();
-            let prefix_items: Vec<&Value> = schemas
-                .iter()
-                .find_map(|s| s.get("prefixItems").or_else(|| s.get("items").filter(|i| i.is_array())))
-                .and_then(Value::as_array)
-                .map(|a| a.iter().collect())
-                .unwrap_or_default();
-
-            for (index, item) in items.iter_mut().enumerate() {
-                if let Some(sub) = prefix_items.get(index) {
-                    coerce_with(item, sub, root, depth + 1);
-                } else if let Some(sub) = item_schemas.iter().find(|s| s.is_object()) {
-                    coerce_with(item, sub, root, depth + 1);
-                }
-            }
-        }
         _ => {}
     }
 }
@@ -211,7 +196,6 @@ mod tests {
                 "flag": { "type": "boolean" },
                 "name": { "type": "string" },
                 "maybe": { "type": ["integer", "null"] },
-                "list": { "type": "array", "items": { "type": "integer" } },
                 "nested": { "$ref": "#/$defs/Nested" }
             },
             "$defs": {
@@ -224,7 +208,6 @@ mod tests {
             "flag": "true",
             "name": "34",
             "maybe": "7",
-            "list": ["1", "x"],
             "nested": { "n": "3" }
         });
 
@@ -238,7 +221,6 @@ mod tests {
                 "flag": true,
                 "name": "34",
                 "maybe": 7,
-                "list": [1, "x"],
                 "nested": { "n": 3 }
             })
         );

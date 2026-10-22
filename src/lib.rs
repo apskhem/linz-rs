@@ -22,7 +22,6 @@ pub use crate::adapter::{
     DocsViewer,
     FallbackHandler,
     Logger,
-    RequestConfig,
 };
 pub use crate::core::{
     BodyKind,
@@ -35,12 +34,15 @@ pub use crate::core::{
     HtmlBody,
     HttpMethod,
     HttpResponse,
+    IntoResponseSpec,
     JsonBody,
     LinzEndpoint,
     LinzEndpointGroup,
+    NoResponse,
     OctetStreamBody,
     Request,
     ResponseBody,
+    ResponsePayload,
     ResponseSpec,
     SenderBody,
     TextBody,
