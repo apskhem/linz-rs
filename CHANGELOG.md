@@ -14,6 +14,8 @@ minor releases (0.x.0) may contain breaking changes.
   example by `tests/hurl/run.sh` and in CI.
 - Criterion benchmarks in `benches/` for request handling, the overhead over plain axum,
   OpenAPI document building and route registration (`cargo bench`).
+- `benches/load.sh`, which load-tests the `bench_server` example over HTTP with oha and reports
+  requests per second and latency percentiles, next to plain axum.
 
 ### Changed
 

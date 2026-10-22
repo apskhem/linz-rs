@@ -72,8 +72,17 @@ over real HTTP: validation errors, coercion, content types, auth, uploads, CORS 
 
 The [Criterion](https://github.com/criterion-rs/criterion.rs) benchmarks in `benches/` measure
 request handling per body type, the overhead over a plain axum handler, OpenAPI document
-building and route registration. Run them with `cargo bench`, or a subset with e.g.
-`cargo bench -- request/`; reports are written to `target/criterion/`.
+building and route registration, one request at a time and in-process. Run them with
+`cargo bench`, or a subset with e.g. `cargo bench -- request/`; reports are written to
+`target/criterion/`.
+
+For requests per second over real HTTP, `benches/load.sh` starts the `bench_server` example and
+load-tests the same endpoints, and their plain axum equivalents, with [oha](https://github.com/hatoo/oha):
+
+```console
+$ benches/load.sh                       # all scenarios, 10s each, 64 connections
+$ DURATION=30s benches/load.sh post     # only scenarios matching "post"
+```
 
 ## Behavior
 
