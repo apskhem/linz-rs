@@ -1424,6 +1424,22 @@ For a stateful app, call `.with_state(..)` on the router before `oneshot`. A reg
 (`create_api(..).unwrap()`) also catches route mistakes, such as mismatched path parameters.
 `tests/api.rs` in this repository has many more examples.
 
+To test over real HTTP, run the server and send requests with an HTTP client. This repository
+does that with [Hurl](https://hurl.dev): `tests/hurl/run.sh` builds and starts the bootstrap
+example, waits for `/health`, and runs the `tests/hurl/*.hurl` files against it. A Hurl test is a
+plain-text request followed by assertions on the response:
+
+```hurl
+GET {{base_url}}/v1/tasks?limit=abc
+HTTP 400
+[Asserts]
+jsonpath "$.errors[0].meta.in" == "queries"
+jsonpath "$.errors[0].meta.result[0].path[0]" == "limit"
+```
+
+Pass extra Hurl options to the script, for example `tests/hurl/run.sh --verbose`. The files run in
+parallel against one server, so each one creates its own data and captures the IDs it needs.
+
 ### 13.17 Use `?` with your own error types
 
 ```rust

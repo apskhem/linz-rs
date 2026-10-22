@@ -101,7 +101,9 @@ async fn download_attachment(
         .header(header::CONTENT_DISPOSITION, disposition))
 }
 
+/// Keeps the last path segment (some clients send a path) and replaces unsafe characters.
 fn sanitize_file_name(name: &str) -> String {
+    let name = name.rsplit(['/', '\\']).next().unwrap_or_default();
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {

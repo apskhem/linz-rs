@@ -212,7 +212,11 @@ async fn uploads_and_downloads_attachments() {
     let app = test_app();
     create_task(&app, json!({ "title": "Write docs" })).await;
 
-    let uploaded = send(&app, upload("/v1/tasks/1/attachments", "my notes.txt", "hello")).await;
+    let uploaded = send(
+        &app,
+        upload("/v1/tasks/1/attachments", "C:\\docs\\my notes.txt", "hello"),
+    )
+    .await;
     assert_eq!(uploaded.status, StatusCode::CREATED);
     let info = uploaded.json();
     assert_eq!(info["fileName"], "my_notes.txt");

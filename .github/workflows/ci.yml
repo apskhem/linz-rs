@@ -19,6 +19,19 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo test --doc
 
+  e2e:
+    name: End-to-end (Hurl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Hurl
+        run: |
+          curl -fsSLO https://github.com/Orange-OpenSource/hurl/releases/download/7.0.0/hurl_7.0.0_amd64.deb
+          sudo apt-get install -y ./hurl_7.0.0_amd64.deb
+      - run: tests/hurl/run.sh
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

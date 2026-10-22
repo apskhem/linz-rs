@@ -64,7 +64,11 @@ end-to-end tests, split into modules.
 $ cargo run --example bootstrap                            # serve; docs at http://localhost:3000/docs
 $ cargo run --example bootstrap -- openapi > openapi.json  # print the OpenAPI document
 $ cargo test --example bootstrap                           # run its tests
+$ tests/hurl/run.sh                                        # run the Hurl end-to-end tests
 ```
+
+The [Hurl](https://hurl.dev) suites in `tests/hurl/` start the example server and test the library
+over real HTTP: validation errors, coercion, content types, auth, uploads, CORS and the docs.
 
 ## Behavior
 

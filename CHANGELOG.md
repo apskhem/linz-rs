@@ -8,6 +8,11 @@ minor releases (0.x.0) may contain breaking changes.
 
 ## [Unreleased]
 
+### Added
+
+- End-to-end tests with [Hurl](https://hurl.dev) in `tests/hurl/`, run against the bootstrap
+  example by `tests/hurl/run.sh` and in CI.
+
 ### Changed
 
 - `examples/bootstrap` is now a starter project for new services: a task tracker with
