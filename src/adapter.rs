@@ -1,8 +1,8 @@
-use std::any::Any;
-use std::convert::identity;
-use std::future::Future;
-use std::marker::PhantomData;
-use std::pin::Pin;
+use std::collections::{
+    BTreeMap,
+    HashSet,
+};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{
@@ -11,263 +11,542 @@ use axum::extract::{
 };
 use axum::response::Response;
 use axum::routing::{
-    connect,
-    delete,
-    get,
-    head,
-    options,
-    patch,
-    post,
-    put,
-    trace,
+    MethodFilter,
+    MethodRouter,
 };
 use axum::Router;
-use bytes::Bytes;
 use http::{
     header,
     Extensions,
+    HeaderMap,
+    HeaderValue,
+    Method,
     StatusCode,
 };
 use http_body_util::BodyExt;
+use serde_json::Value;
+use tower_http::cors::{
+    AllowHeaders,
+    Any,
+    CorsLayer,
+};
 
 use crate::core::*;
 use crate::err::{
-    RequestValidationError,
-    SecurityError,
+    ApiError,
+    BodyParserError,
+    JsonApiErrorItem,
+    JsonApiErrorResponse,
+    ValidationIssue,
 };
-use crate::internal::utils;
+use crate::internal::files::FileStore;
+use crate::internal::{
+    body,
+    utils,
+};
 
-#[derive(Debug, Default, Clone)]
-pub struct CreateApiConfig {}
+/// A logger with the levels of RFC 5424. Every method is a no-op by default.
+pub trait Logger: Send + Sync {
+    /// Level 0
+    fn emergency(&self, _message: &str) {}
+    /// Level 1
+    fn alert(&self, _message: &str) {}
+    /// Level 2
+    fn critical(&self, _message: &str) {}
+    /// Level 3
+    fn error(&self, _message: &str) {}
+    /// Level 4
+    fn warning(&self, _message: &str) {}
+    /// Level 5
+    fn notice(&self, _message: &str) {}
+    /// Level 6
+    fn info(&self, _message: &str) {}
+    /// Level 7
+    fn debug(&self, _message: &str) {}
+}
 
-pub fn create_api<S: Send + Sync + Clone + 'static>(
-    app: Router<S>,
-    endpoints: Vec<(impl ToString, impl axum::handler::Handler<Bytes, S>)>,
-    config: CreateApiConfig,
-) -> Result<Router<S>, String> {
+/// Configurations for incoming requests.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RequestConfig {
+    /// Enables parsing multiple values for a query string.
+    /// If `false`, only the last value is used.
+    pub multi_value_query_string: bool,
+    /// Enables parsing multiple values for `multipart/form-data`.
+    /// If `false`, only the last value is used.
+    pub multi_value_form_data: bool,
+    /// Enables parsing multiple values for `application/x-www-form-urlencoded`.
+    /// If `false`, only the last value is used.
+    pub multi_value_url_encoded: bool,
+}
+
+/// CORS configurations.
+#[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
+pub enum CorsConfig {
+    /// Allows any origin with the methods `GET`, `HEAD`, `PUT`, `PATCH`, `POST` and `DELETE`
+    /// and mirrors the requested headers.
+    Permissive,
+    Custom(CorsLayer),
+}
+
+impl CorsConfig {
+    fn into_layer(self) -> CorsLayer {
+        match self {
+            Self::Permissive => {
+                CorsLayer::new()
+                    .allow_origin(Any)
+                    .allow_methods([
+                        Method::GET,
+                        Method::HEAD,
+                        Method::PUT,
+                        Method::PATCH,
+                        Method::POST,
+                        Method::DELETE,
+                    ])
+                    .allow_headers(AllowHeaders::mirror_request())
+            }
+            Self::Custom(layer) => layer,
+        }
+    }
+}
+
+/// The documents viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DocsViewer {
+    Scalar,
+    Swagger,
+    Redoc,
+    Rapidoc,
+    SpotlightElements,
+}
+
+impl DocsViewer {
+    fn template(&self) -> &'static str {
+        match self {
+            Self::Scalar => include_str!("templates/scalar.html"),
+            Self::Swagger => include_str!("templates/swagger.html"),
+            Self::Redoc => include_str!("templates/redoc.html"),
+            Self::Rapidoc => include_str!("templates/rapidoc.html"),
+            Self::SpotlightElements => include_str!("templates/spotlight-elements.html"),
+        }
+    }
+}
+
+/// Configurations related to OpenAPI documents.
+#[derive(Debug, Clone)]
+pub struct DocsConfig {
+    /// The documents viewer.
+    pub viewer: DocsViewer,
+    /// The OpenAPI spec, e.g. built by [`crate::json_builder::build_json`].
+    pub spec: Value,
+    /// The path for users to view the docs. The docs will render to the set `viewer`.
+    pub docs_path: String,
+    /// The path to get the OpenAPI spec file in JSON.
+    pub spec_path: String,
+    /// The theme configurations for the docs viewer.
+    pub theme: Option<String>,
+}
+
+/// A handler for requests that match no route. Returning `None` responds with `404 Not Found`.
+pub type FallbackHandler = Arc<dyn Fn(axum::extract::Request) -> BoxFuture<Option<Response>> + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct CreateApiConfig {
+    /// CORS configurations.
+    pub cors: Option<CorsConfig>,
+    /// Configurations related to OpenAPI documents.
+    pub docs: Option<DocsConfig>,
+    /// Incoming requests configurations. Applies to all endpoints.
+    pub request: RequestConfig,
+    pub logger: Option<Arc<dyn Logger>>,
+    pub fallback_handler: Option<FallbackHandler>,
+}
+
+struct Shared {
+    request: RequestConfig,
+    logger: Option<Arc<dyn Logger>>,
+}
+
+impl Shared {
+    fn info(&self, message: &str) {
+        if let Some(logger) = &self.logger {
+            logger.info(message);
+        }
+    }
+
+    fn error(&self, message: &str) {
+        if let Some(logger) = &self.logger {
+            logger.error(message);
+        }
+    }
+}
+
+/// Registers the endpoints (and optionally the docs, CORS and fallback) to the router.
+///
+/// Keys of `endpoints` are `method:path`, e.g. `get:/users/:id`. Path parameters can be
+/// written as `:name` or `{name}`.
+pub fn create_api<S>(app: Router<S>, endpoints: LinzEndpointGroup, config: CreateApiConfig) -> Result<Router<S>, String>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    let shared = Arc::new(Shared {
+        request: config.request,
+        logger: config.logger.clone(),
+    });
+
+    shared.info(&format!("Registering {} endpoints...", endpoints.len()));
+
+    let mut routes: BTreeMap<String, (MethodRouter<S>, HashSet<Method>)> = BTreeMap::new();
+    let mut add_route = |path: &str, method: Method, method_router: MethodRouter<S>| -> Result<(), String> {
+        let (axum_path, _) = utils::convert_path_params(path);
+        let (existing, methods) = routes.remove(&axum_path).unwrap_or_default();
+
+        if !methods.is_empty() && methods.contains(&method) {
+            return Err(format!("Duplicate route {method} {path}"));
+        }
+
+        let mut methods = methods;
+        methods.insert(method);
+        routes.insert(axum_path, (existing.merge(method_router), methods));
+        Ok(())
+    };
+
+    let mut registered_op_ids = HashSet::new();
+    for (method_path, endpoint) in endpoints {
+        let (method, path) = utils::split_method_path(&method_path)?;
+
+        if !registered_op_ids.insert(endpoint.operation_id().to_string()) {
+            return Err(format!(
+                "Duplicate operation ID \"{}\" for path {path}",
+                endpoint.operation_id()
+            ));
+        }
+
+        shared.info(&format!(
+            "{} -> {} {path}",
+            endpoint.operation_id(),
+            method.as_str().to_uppercase()
+        ));
+
+        let endpoint = Arc::new(endpoint);
+        let shared = shared.clone();
+        let handler = move |req: axum::extract::Request| {
+            let endpoint = endpoint.clone();
+            let shared = shared.clone();
+            async move { handle(&endpoint, method, &shared, req).await }
+        };
+
+        add_route(
+            &path,
+            method.to_method(),
+            MethodRouter::new().on(method.method_filter(), handler),
+        )?;
+    }
+
+    // docs config
+    if let Some(docs) = &config.docs {
+        let spec_json = serde_json::to_string(&docs.spec).map_err(|e| e.to_string())?;
+        let title = docs.spec["info"]["title"].as_str().unwrap_or_default();
+        let html = docs
+            .viewer
+            .template()
+            .replace("{{title}}", &escape_html(title))
+            .replace("{{specUrl}}", &docs.spec_path)
+            .replace("{{theme}}", docs.theme.as_deref().unwrap_or_default());
+
+        add_route(
+            &docs.spec_path,
+            Method::GET,
+            MethodRouter::new().on(MethodFilter::GET, move || {
+                let spec_json = spec_json.clone();
+                async move { raw_response(StatusCode::OK, mime::APPLICATION_JSON.as_ref(), spec_json) }
+            }),
+        )?;
+        add_route(
+            &docs.docs_path,
+            Method::GET,
+            MethodRouter::new().on(MethodFilter::GET, move || {
+                let html = html.clone();
+                async move { raw_response(StatusCode::OK, mime::TEXT_HTML.as_ref(), html) }
+            }),
+        )?;
+    }
+
     let mut app = app;
-
-    for (path, endpoint) in endpoints {
-        app = add_route(app, path.to_string().as_str(), endpoint)?;
+    for (path, (method_router, _)) in routes {
+        app = app.route(
+            &path,
+            method_router
+                .fallback(|req: axum::extract::Request| async move { not_found(req.method(), req.uri().path()) }),
+        );
     }
 
-    Ok(app)
-}
+    // fallback
+    let fallback_handler = config.fallback_handler.clone();
+    app = app.fallback(move |req: axum::extract::Request| {
+        let fallback_handler = fallback_handler.clone();
+        async move {
+            let method = req.method().clone();
+            let path = req.uri().path().to_string();
 
-fn add_route<S>(
-    app: Router<S>,
-    path: &str,
-    endpoint: impl axum::handler::Handler<Bytes, S>,
-) -> Result<Router<S>, String>
-where
-    S: Send + Sync + Clone + 'static,
-{
-    if utils::is_valid_path(path) {
-        return Err(format!("'{}' is not a valid path", path));
-    }
-
-    let mut p = path.splitn(2, ":");
-    let (Some(method), Some(path)) = (p.next(), p.next()) else {
-        return Err(format!("'{}' is not a valid path", path));
-    };
-
-    let app = match method {
-        "get" => app.route(path, get(endpoint)),
-        "post" => app.route(path, post(endpoint)),
-        "put" => app.route(path, put(endpoint)),
-        "patch" => app.route(path, patch(endpoint)),
-        "delete" => app.route(path, delete(endpoint)),
-        "connect" => app.route(path, connect(endpoint)),
-        "head" => app.route(path, head(endpoint)),
-        "options" => app.route(path, options(endpoint)),
-        "trace" => app.route(path, trace(endpoint)),
-        _ => return Err(format!("'{}' is not a valid method", method)),
-    };
-
-    Ok(app)
-}
-
-trait EndpointHandler<S: Send + Sync + 'static>: axum::handler::Handler<Bytes, S> + Sized {}
-
-impl<Q, H, P, C, B, R, S> axum::handler::Handler<Bytes, S> for Endpoint<Q, H, P, C, B, R>
-where
-    Q: DataTransferObject + 'static,
-    H: DataTransferObject + 'static,
-    P: DataTransferObject + 'static,
-    C: DataTransferObject + 'static,
-    B: DataTransferObject + 'static,
-    R: DataTransferObject + 'static,
-    S: Send + Sync + 'static,
-{
-    type Future = Pin<Box<dyn Future<Output = Response> + Send>>;
-
-    fn call(self, req: axum::extract::Request, state: S) -> Self::Future {
-        Box::pin(async move {
-            let undefined_type = PhantomData::<()>::default().type_id();
-
-            let raw_params;
-            let req = {
-                let (mut parts, body) = req.into_parts();
-
-                raw_params = match RawPathParams::from_request_parts(&mut parts, &state).await {
-                    Ok(raw) => raw,
-                    Err(err) => return utils::handle_response_error(StatusCode::BAD_REQUEST, err),
-                };
-
-                let body = match body.collect().await {
-                    Ok(body) => body.to_bytes(),
-                    Err(err) => return utils::handle_internal_error(err),
-                };
-
-                http::Request::from_parts(parts, body)
-            };
-
-            let mut extentions = Extensions::new();
-
-            for security in &self.security {
-                if let Err(err) = security.authenticate(&req, &mut extentions).await {
-                    return err.try_into().map_or_else(utils::handle_internal_error, identity);
+            if let Some(fallback_handler) = fallback_handler {
+                if let Some(response) = fallback_handler(req).await {
+                    return response;
                 }
             }
 
-            let mut validation_errors = RequestValidationError::default();
+            not_found(&method, &path)
+        }
+    });
 
-            let validated_req = Request {
-                queries: {
-                    if self.parameters.query.type_id() != undefined_type {
-                        req.uri().query().and_then(|qs| {
-                            let qs: serde_json::Value = serde_qs::from_str(qs).unwrap();
+    if let Some(cors) = config.cors {
+        app = app.layer(cors.into_layer());
+    }
 
-                            Q::validate_json_and_transform(qs)
-                                .map_err(|e| validation_errors.queries = Some(e))
-                                .ok()
-                        })
-                    } else {
-                        None
-                    }
-                },
-                headers: {
-                    if self.parameters.header.type_id() != undefined_type {
-                        let json_headers = utils::headers_to_json(req.headers());
+    Ok(app)
+}
 
-                        H::validate_json_and_transform(json_headers)
-                            .map_err(|e| validation_errors.headers = Some(e))
-                            .ok()
-                    } else {
-                        None
-                    }
-                },
-                params: {
-                    let params: Vec<_> = raw_params.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
-                    let params: serde_json::Value = serde_qs::from_str(&params.join("&")).unwrap();
+enum Failure {
+    Api(ApiError),
+    BodyParser(BodyParserError),
+    Validation(Vec<ValidationIssue>),
+    InvalidOutput(String),
+    Internal(String),
+}
 
-                    if self.parameters.path.type_id() != undefined_type {
-                        P::validate_json_and_transform(params)
-                            .map_err(|e| validation_errors.params = Some(e))
-                            .ok()
-                    } else {
-                        None
-                    }
-                },
-                cookies: {
-                    if self.parameters.cookie.type_id() != undefined_type {
-                        req.headers()
-                            .get(header::COOKIE)
-                            .and_then(|v| v.to_str().ok())
-                            .and_then(|v| {
-                                let cookie = utils::parse_cookie(v);
-                                let cookie = serde_json::Value::Object(
-                                    cookie
-                                        .into_iter()
-                                        .map(|(k, v)| (k, serde_json::Value::String(v)))
-                                        .collect(),
-                                );
-
-                                C::validate_json_and_transform(cookie)
-                                    .map_err(|e| validation_errors.cookies = Some(e))
-                                    .ok()
-                            })
-                    } else {
-                        None
-                    }
-                },
-                body: {
-                    if self.request_body.type_id() != undefined_type {
-                        B::validate_and_transform(req.body())
-                            .map_err(|e| validation_errors.body = Some(e))
-                            .ok()
-                    } else {
-                        None
-                    }
-                },
-            };
-
-            if validation_errors.is_err() {}
-
-            let result = (self.handler)(validated_req, extentions).await;
-
-            // TODO: validate output payload
-
-            let response = result.try_into().map_or_else(utils::handle_internal_error, identity);
-
-            response
-        })
+async fn handle(endpoint: &LinzEndpoint, method: HttpMethod, shared: &Shared, req: axum::extract::Request) -> Response {
+    match process(endpoint, method, shared, req).await {
+        Ok(response) => response,
+        Err(failure) => failure_response(failure, shared),
     }
 }
 
-impl<B: DataTransferObject> TryInto<Response<Body>> for HTTPResponse<B> {
-    type Error = String;
+async fn process(
+    endpoint: &LinzEndpoint,
+    method: HttpMethod,
+    shared: &Shared,
+    req: axum::extract::Request,
+) -> Result<Response, Failure> {
+    let meta = endpoint.meta();
+    let (mut parts, body) = req.into_parts();
 
-    fn try_into(self) -> Result<Response<Body>, Self::Error> {
-        let resp_builder = Response::builder().status(self.status);
+    let raw_params = RawPathParams::from_request_parts(&mut parts, &())
+        .await
+        .map_err(|e| Failure::Internal(e.to_string()))?;
+    let params = Value::Object(
+        raw_params
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+            .collect(),
+    );
 
-        let mut resp_builder = resp_builder.header(header::CONTENT_TYPE, B::encoding_content_type().to_string());
+    let body = body
+        .collect()
+        .await
+        .map_err(|e| Failure::Internal(e.to_string()))?
+        .to_bytes();
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let body = body::parse_body(&body, content_type, &shared.request).map_err(Failure::BodyParser)?;
 
-        for (key, value) in self.headers {
-            if let Some(key) = key {
-                resp_builder = resp_builder.header(key, value)
+    // process auth (if has) sequentially
+    let mut extensions = Extensions::new();
+    for applied in &meta.security {
+        extensions.extend(applied.authenticate(&parts).await.map_err(Failure::Api)?);
+    }
+
+    let queries = utils::query_to_json(parts.uri.query(), shared.request.multi_value_query_string);
+    let cookies = utils::cookies_to_json(
+        parts
+            .headers
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default(),
+    );
+    let headers = utils::headers_to_json(&parts.headers);
+
+    let input = RawInput {
+        body: match body {
+            Some(parsed) => {
+                RawPart {
+                    value: parsed.value,
+                    files: parsed.files,
+                    coerce: parsed.textual,
+                }
             }
+            None => {
+                RawPart {
+                    value: Value::Null,
+                    files: FileStore::default(),
+                    coerce: false,
+                }
+            }
+        },
+        queries: RawPart::textual(queries),
+        params: RawPart::textual(params),
+        headers: RawPart::textual(headers),
+        cookies: RawPart::textual(cookies),
+    };
+    let ctx = Context {
+        security: meta.security.clone(),
+        extensions,
+        request: parts,
+    };
+
+    // validate and process main handler
+    let result = (endpoint.handler)(input, ctx).await.map_err(|err| {
+        match err {
+            HandlerError::Validation(issues) => Failure::Validation(issues),
+            HandlerError::Api(err) => Failure::Api(err),
         }
+    })?;
 
-        let resp_builder = resp_builder.body(
-            self.body
-                .map(|b| b.into_bytes().map(Body::from).map_err(|err| format!("{err:?}")))
-                .transpose()?
-                .unwrap_or_default(),
-        );
+    let status = result.status.unwrap_or(match method {
+        HttpMethod::Post => StatusCode::CREATED,
+        _ => StatusCode::OK,
+    });
 
-        resp_builder.map_err(|e| e.to_string())
+    let descriptor = match meta.responses.get(&status.as_u16()) {
+        Some(ResponseSpec::Body(descriptor)) => Some(descriptor),
+        Some(_) => None,
+        None => meta.default_response.as_ref(),
+    };
+    let Some(descriptor) = descriptor else {
+        shared.error(&format!(
+            "There is no corresponding validator defined in schema for status {}/default",
+            status.as_u16()
+        ));
+        return Err(Failure::Internal("Internal server error".to_string()));
+    };
+
+    // response
+    let (value, files) = match result.body {
+        ErasedBody::Stream(stream) => return Ok(build_response(status, HeaderMap::new(), result.headers, stream)),
+        ErasedBody::Empty => (Value::Null, FileStore::default()),
+        ErasedBody::Data(serialize) => serialize(descriptor.kind.carries_files()).map_err(Failure::InvalidOutput)?,
+    };
+
+    if descriptor.is_void() {
+        if !value.is_null() {
+            return Err(Failure::InvalidOutput("Expected no body".to_string()));
+        }
+        return Ok(build_response(status, HeaderMap::new(), result.headers, Body::empty()));
+    }
+
+    let errors = descriptor.schema.validate(&value);
+    if !errors.is_empty() {
+        return Err(Failure::InvalidOutput(
+            serde_json::to_string(&errors).unwrap_or_default(),
+        ));
+    }
+
+    if value.is_null() && descriptor.schema.is_option {
+        return Ok(build_response(status, HeaderMap::new(), result.headers, Body::empty()));
+    }
+
+    let encoded = body::encode_body(descriptor.kind, &value, &files).map_err(Failure::InvalidOutput)?;
+    let content_type = encoded
+        .content_type
+        .unwrap_or_else(|| descriptor.kind.mime_type().to_string());
+
+    let mut base_headers = HeaderMap::new();
+    if let Ok(content_type) = HeaderValue::from_str(&content_type) {
+        base_headers.insert(header::CONTENT_TYPE, content_type);
+    }
+
+    Ok(build_response(
+        status,
+        base_headers,
+        result.headers,
+        Body::from(encoded.bytes),
+    ))
+}
+
+/// Builds a response where `headers` override `base_headers`.
+fn build_response(status: StatusCode, mut base_headers: HeaderMap, headers: HeaderMap, body: Body) -> Response {
+    for name in headers.keys() {
+        base_headers.remove(name);
+    }
+    base_headers.extend(headers);
+
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    *response.headers_mut() = base_headers;
+    response
+}
+
+fn raw_response(status: StatusCode, content_type: &str, body: impl Into<Body>) -> Response {
+    let mut headers = HeaderMap::new();
+    if let Ok(content_type) = HeaderValue::from_str(content_type) {
+        headers.insert(header::CONTENT_TYPE, content_type);
+    }
+    build_response(status, headers, HeaderMap::new(), body.into())
+}
+
+fn error_response(status: StatusCode, errors: Vec<JsonApiErrorItem>, headers: HeaderMap) -> Response {
+    let body = serde_json::to_vec(&JsonApiErrorResponse { errors }).unwrap_or_default();
+    let mut base_headers = HeaderMap::new();
+    base_headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    build_response(status, base_headers, headers, Body::from(body))
+}
+
+fn failure_response(failure: Failure, shared: &Shared) -> Response {
+    match failure {
+        Failure::Api(err) => error_response(err.status, err.errors, err.headers),
+        Failure::BodyParser(err) => {
+            error_response(
+                err.status,
+                vec![JsonApiErrorItem::detail(err.message)],
+                HeaderMap::new(),
+            )
+        }
+        Failure::Validation(issues) => {
+            let errors = issues
+                .into_iter()
+                .map(|issue| {
+                    JsonApiErrorItem {
+                        meta: serde_json::to_value(issue).ok().and_then(|v| v.as_object().cloned()),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            error_response(StatusCode::BAD_REQUEST, errors, HeaderMap::new())
+        }
+        Failure::InvalidOutput(message) => {
+            shared.error("Invalid output format to the corresponding defined output schema");
+            shared.error(&message);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                vec![JsonApiErrorItem::detail("Internal server error")],
+                HeaderMap::new(),
+            )
+        }
+        Failure::Internal(message) => {
+            shared.error(&message);
+            error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                vec![JsonApiErrorItem::detail(message)],
+                HeaderMap::new(),
+            )
+        }
     }
 }
 
-impl TryInto<Response<Body>> for SecurityError {
-    type Error = String;
+fn not_found(method: &Method, path: &str) -> Response {
+    error_response(
+        StatusCode::NOT_FOUND,
+        vec![JsonApiErrorItem::detail(format!("Cannot find {method} {path}"))],
+        HeaderMap::new(),
+    )
+}
 
-    fn try_into(self) -> Result<Response<Body>, Self::Error> {
-        let mut resp_status = StatusCode::UNAUTHORIZED;
-        let mut json_body = serde_json::Map::with_capacity(2);
-
-        match self {
-            SecurityError::Custom(msg) => {
-                json_body.insert("code".into(), resp_status.as_u16().into());
-                json_body.insert("message".into(), msg.as_str().into());
-            }
-            SecurityError::WithStatus((status, msg)) => {
-                resp_status = status;
-
-                json_body.insert("code".into(), status.as_u16().into());
-                json_body.insert("message".into(), msg.as_str().into());
-            }
-            _ => {
-                json_body.insert("code".into(), resp_status.as_u16().into());
-                json_body.insert("message".into(), self.to_string().into());
-            }
-        }
-
-        Response::builder()
-            .status(resp_status)
-            .header(header::CONTENT_TYPE, mime::APPLICATION_JSON.to_string())
-            .body(Body::from(serde_json::Value::Object(json_body).to_string()))
-            .map_err(|err| err.to_string())
-    }
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }

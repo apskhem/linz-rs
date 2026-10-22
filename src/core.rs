@@ -1,241 +1,944 @@
-use std::collections::HashMap;
+use std::any::TypeId;
+use std::collections::BTreeMap;
+use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
-use std::sync::{
-    Arc,
-    OnceLock,
-};
+use std::sync::Arc;
 
+use axum::body::Body;
+use axum::routing::MethodFilter;
+use bytes::Bytes;
+use http::header::{
+    HeaderName,
+    HeaderValue,
+};
 use http::{
     Extensions,
     HeaderMap,
-    HeaderName,
+    Method,
     StatusCode,
 };
-use mime::Mime;
 use oas3::spec;
-use schemars::gen::*;
+use schemars::gen::SchemaGenerator;
+use schemars::schema::{
+    InstanceType,
+    Schema,
+    SchemaObject,
+};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{
+    Deserialize,
+    Deserializer,
+    Serialize,
+    Serializer,
+};
+use serde_json::Value;
 
-use crate::err::*;
-use crate::security;
+use crate::err::{
+    ApiError,
+    ValidationFieldError,
+    ValidationIssue,
+};
+use crate::internal::files::{
+    self,
+    FileStore,
+};
+use crate::internal::schema;
+use crate::security::AppliedSecurity;
 
-pub type EndpointHandler<Q, H, P, C, B, R> = Arc<
-    dyn Fn(Request<Q, H, P, C, B>, Extensions) -> Pin<Box<dyn Future<Output = HTTPResponse<R>> + Send>> + Send + Sync,
->;
+pub(crate) type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
-pub trait DataTransferObject: JsonSchema + DeserializeOwned + Serialize + Clone + Send + Sync {
-    fn bind() -> PhantomData<Self> {
-        PhantomData::<Self>::default()
-    }
+/// Supported HTTP methods of endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
 
-    fn jsonschema_validator() -> &'static jsonschema::Validator {
-        static VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+/// All supported HTTP methods.
+pub const METHODS: [HttpMethod; 5] = [
+    HttpMethod::Get,
+    HttpMethod::Post,
+    HttpMethod::Put,
+    HttpMethod::Patch,
+    HttpMethod::Delete,
+];
 
-        VALIDATOR.get_or_init(|| {
-            let mut generator = SchemaGenerator::new(SchemaSettings::openapi3());
-
-            let schema = Self::json_schema(&mut generator);
-            let json = serde_json::to_value(&schema).unwrap();
-            let validator = jsonschema::validator_for(&json).unwrap();
-
-            validator
-        })
-    }
-
-    fn decoding_content_type() -> Mime {
-        mime::APPLICATION_JSON
-    }
-
-    fn content_type_decoder(payload: &[u8]) -> Result<serde_json::Value, PayloadError> {
-        serde_json::from_slice(payload).map_err(|_| PayloadError::InvalidData)
-    }
-
-    fn validate_json_payload(payload: &serde_json::Value) -> Result<(), PayloadError> {
-        let err_results: Vec<_> = Self::jsonschema_validator()
-            .iter_errors(payload)
-            .map(ValidationFieldError::from)
-            .collect();
-
-        if !err_results.is_empty() {
-            return Err(PayloadError::FailedValidating(err_results));
+impl HttpMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Get => "get",
+            Self::Post => "post",
+            Self::Put => "put",
+            Self::Patch => "patch",
+            Self::Delete => "delete",
         }
-
-        return Ok(());
     }
 
-    fn validate_and_transform(payload: &[u8]) -> Result<Self, PayloadError> {
-        let payload = Self::content_type_decoder(payload)?;
-
-        Self::validate_json_and_transform(payload)
+    pub fn parse(method: &str) -> Option<Self> {
+        METHODS.into_iter().find(|m| m.as_str() == method)
     }
 
-    fn validate_json_and_transform(payload: serde_json::Value) -> Result<Self, PayloadError> {
-        Self::validate_json_payload(&payload)?;
-
-        Self::deserialize(payload).map_err(|_| PayloadError::FailedDeserializing)
+    pub(crate) fn method_filter(&self) -> MethodFilter {
+        match self {
+            Self::Get => MethodFilter::GET,
+            Self::Post => MethodFilter::POST,
+            Self::Put => MethodFilter::PUT,
+            Self::Patch => MethodFilter::PATCH,
+            Self::Delete => MethodFilter::DELETE,
+        }
     }
 
-    fn encoding_content_type() -> Mime {
-        mime::APPLICATION_JSON
-    }
-
-    fn content_type_encoder(self) -> Result<serde_json::Value, PayloadError> {
-        serde_json::to_value(self).map_err(|_| PayloadError::FailedSerializing)
-    }
-
-    fn into_bytes(self) -> Result<Vec<u8>, PayloadError> {
-        self.content_type_encoder()
-            .map(|payload| payload.to_string().as_bytes().to_vec())
+    pub fn to_method(&self) -> Method {
+        match self {
+            Self::Get => Method::GET,
+            Self::Post => Method::POST,
+            Self::Put => Method::PUT,
+            Self::Patch => Method::PATCH,
+            Self::Delete => Method::DELETE,
+        }
     }
 }
 
-#[derive(Clone)]
-pub struct Endpoint<Q, H, P, C, B, R>
-where
-    Q: DataTransferObject,
-    H: DataTransferObject,
-    P: DataTransferObject,
-    C: DataTransferObject,
-    B: DataTransferObject,
-    R: DataTransferObject,
-{
+impl fmt::Display for HttpMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A type that can be validated and deserialized from an incoming request part.
+///
+/// Implemented for every type that implements [`JsonSchema`] and [`DeserializeOwned`].
+/// The JSON schema generated by `schemars` is used both for validation and for the
+/// OpenAPI document, so `#[schemars(...)]`/`#[validate(...)]` attributes such as
+/// `length`, `range` and `regex` are enforced.
+pub trait DataTransferObject: JsonSchema + DeserializeOwned + Send + 'static {}
+
+impl<T> DataTransferObject for T where T: JsonSchema + DeserializeOwned + Send + 'static {}
+
+/// A type-erased handle to the JSON schema of a Rust type.
+#[derive(Clone, Copy)]
+pub struct TypeSchema {
+    pub(crate) docs: fn(&mut SchemaGenerator) -> Schema,
+    pub(crate) compiled: fn() -> &'static schema::CompiledSchema,
+    pub(crate) is_unit: bool,
+    pub(crate) is_option: bool,
+}
+
+impl TypeSchema {
+    pub fn of<T: JsonSchema + ?Sized + 'static>() -> Self {
+        Self {
+            docs: |generator| T::_schemars_private_non_optional_json_schema(generator),
+            compiled: schema::compiled::<T>,
+            is_unit: TypeId::of::<T>() == TypeId::of::<()>(),
+            is_option: T::_schemars_private_is_option(),
+        }
+    }
+
+    /// Validates a JSON value against the schema.
+    pub(crate) fn validate(&self, value: &Value) -> Vec<ValidationFieldError> {
+        (self.compiled)().validator.iter_errors(value).map(Into::into).collect()
+    }
+}
+
+impl fmt::Debug for TypeSchema {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TypeSchema")
+            .field("is_unit", &self.is_unit)
+            .field("is_option", &self.is_option)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A binary payload, either a file of a `multipart/form-data` body or a whole
+/// `application/octet-stream` body.
+///
+/// It can only be (de)serialized as part of [`FormDataBody`] or [`OctetStreamBody`] payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct File {
+    pub name: Option<String>,
+    pub content_type: Option<String>,
+    pub data: Bytes,
+}
+
+impl File {
+    pub fn new(data: impl Into<Bytes>) -> Self {
+        Self {
+            data: data.into(),
+            ..Default::default()
+        }
+    }
+
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
+        self.content_type = Some(content_type.into());
+        self
+    }
+}
+
+impl Serialize for File {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match files::put_into_outbox(self) {
+            Some(placeholder) => serializer.serialize_str(&placeholder),
+            None => {
+                Err(serde::ser::Error::custom(
+                    "`File` can only be serialized in a multipart/form-data or application/octet-stream body",
+                ))
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for File {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let placeholder = String::deserialize(deserializer)?;
+
+        files::take_from_inbox(&placeholder).ok_or_else(|| serde::de::Error::custom("expected a file"))
+    }
+}
+
+impl JsonSchema for File {
+    fn schema_name() -> String {
+        "File".to_string()
+    }
+
+    fn is_referenceable() -> bool {
+        false
+    }
+
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        let mut schema = SchemaObject {
+            instance_type: Some(InstanceType::String.into()),
+            format: Some("binary".to_string()),
+            ..Default::default()
+        };
+        schema
+            .extensions
+            .insert("contentMediaType".to_string(), "application/octet-stream".into());
+        schema.into()
+    }
+}
+
+/// The kind of payload of a request or response body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BodyKind {
+    /// `application/json`
+    Json,
+    /// `multipart/form-data`
+    FormData,
+    /// `application/x-www-form-urlencoded`
+    UrlEncoded,
+    /// `application/octet-stream`
+    OctetStream,
+    /// `text/plain`
+    Text,
+    /// `text/html`
+    Html,
+}
+
+impl BodyKind {
+    pub fn mime_type(&self) -> &'static str {
+        match self {
+            Self::Json => "application/json",
+            Self::FormData => "multipart/form-data",
+            Self::UrlEncoded => "application/x-www-form-urlencoded",
+            Self::OctetStream => "application/octet-stream",
+            Self::Text => "text/plain",
+            Self::Html => "text/html",
+        }
+    }
+
+    /// Whether serialized values may contain [`File`]s.
+    pub(crate) fn carries_files(&self) -> bool {
+        matches!(self, Self::FormData | Self::OctetStream)
+    }
+}
+
+/// Encoding of a single property of a `multipart/form-data` or
+/// `application/x-www-form-urlencoded` body.
+#[derive(Debug, Clone, Default)]
+pub struct EncodingItem {
+    pub content_type: Vec<String>,
+    pub headers: Option<TypeSchema>,
+    pub style: Option<String>,
+    pub explode: Option<bool>,
+    pub allow_reserved: Option<bool>,
+}
+
+impl EncodingItem {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn content_type(mut self, content_types: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.content_type = content_types.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn headers<H: JsonSchema + 'static>(mut self) -> Self {
+        self.headers = Some(TypeSchema::of::<H>());
+        self
+    }
+
+    pub fn style(mut self, style: impl Into<String>) -> Self {
+        self.style = Some(style.into());
+        self
+    }
+
+    pub fn explode(mut self, explode: bool) -> Self {
+        self.explode = Some(explode);
+        self
+    }
+
+    pub fn allow_reserved(mut self, allow_reserved: bool) -> Self {
+        self.allow_reserved = Some(allow_reserved);
+        self
+    }
+}
+
+/// The type-erased description of a request or response body.
+#[derive(Debug, Clone)]
+pub struct BodyDescriptor {
+    pub kind: BodyKind,
+    pub schema: TypeSchema,
+    pub description: Option<String>,
+    /// Headers of a response (documentation only).
+    pub headers: Option<TypeSchema>,
+    pub examples: BTreeMap<String, spec::Example>,
+    pub encoding: BTreeMap<String, EncodingItem>,
+}
+
+impl BodyDescriptor {
+    /// Whether the body has no content, i.e. its type is `()`.
+    pub fn is_void(&self) -> bool {
+        self.schema.is_unit
+    }
+}
+
+/// A typed request or response body. Create it with [`JsonBody`], [`FormDataBody`],
+/// [`UrlEncodedBody`], [`OctetStreamBody`], [`TextBody`] or [`HtmlBody`].
+pub struct SenderBody<T> {
+    pub(crate) descriptor: BodyDescriptor,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for SenderBody<T> {
+    fn clone(&self) -> Self {
+        Self {
+            descriptor: self.descriptor.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> fmt::Debug for SenderBody<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.descriptor.fmt(f)
+    }
+}
+
+impl<T: JsonSchema + 'static> SenderBody<T> {
+    pub fn new(kind: BodyKind) -> Self {
+        Self {
+            descriptor: BodyDescriptor {
+                kind,
+                schema: TypeSchema::of::<T>(),
+                description: None,
+                headers: None,
+                examples: BTreeMap::new(),
+                encoding: BTreeMap::new(),
+            },
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> SenderBody<T> {
+    pub fn describe(mut self, description: impl Into<String>) -> Self {
+        self.descriptor.description = Some(description.into());
+        self
+    }
+
+    /// Declares the headers of a response.
+    pub fn require_headers<H: JsonSchema + 'static>(mut self) -> Self {
+        self.descriptor.headers = Some(TypeSchema::of::<H>());
+        self
+    }
+
+    pub fn set_examples(mut self, examples: impl IntoIterator<Item = (impl Into<String>, spec::Example)>) -> Self {
+        self.descriptor.examples = examples.into_iter().map(|(k, v)| (k.into(), v)).collect();
+        self
+    }
+
+    /// Sets the encoding of a property (`multipart/form-data` and
+    /// `application/x-www-form-urlencoded` only).
+    pub fn encoding(mut self, property: impl Into<String>, item: EncodingItem) -> Self {
+        self.descriptor.encoding.insert(property.into(), item);
+        self
+    }
+
+    pub fn descriptor(&self) -> &BodyDescriptor {
+        &self.descriptor
+    }
+}
+
+/// `application/json` body.
+pub struct JsonBody;
+
+impl JsonBody {
+    pub const MIME_TYPE: &'static str = "application/json";
+
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new<T: JsonSchema + 'static>() -> SenderBody<T> {
+        SenderBody::new(BodyKind::Json)
+    }
+}
+
+/// `multipart/form-data` body. Use [`File`] for file fields.
+pub struct FormDataBody;
+
+impl FormDataBody {
+    pub const MIME_TYPE: &'static str = "multipart/form-data";
+
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new<T: JsonSchema + 'static>() -> SenderBody<T> {
+        SenderBody::new(BodyKind::FormData)
+    }
+}
+
+/// `application/x-www-form-urlencoded` body.
+pub struct UrlEncodedBody;
+
+impl UrlEncodedBody {
+    pub const MIME_TYPE: &'static str = "application/x-www-form-urlencoded";
+
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new<T: JsonSchema + 'static>() -> SenderBody<T> {
+        SenderBody::new(BodyKind::UrlEncoded)
+    }
+}
+
+/// `application/octet-stream` body, represented by [`File`].
+pub struct OctetStreamBody;
+
+impl OctetStreamBody {
+    pub const MIME_TYPE: &'static str = "application/octet-stream";
+
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new() -> SenderBody<File> {
+        SenderBody::new(BodyKind::OctetStream)
+    }
+}
+
+/// `text/plain` body.
+pub struct TextBody;
+
+impl TextBody {
+    pub const MIME_TYPE: &'static str = "text/plain";
+
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new() -> SenderBody<String> {
+        SenderBody::new(BodyKind::Text)
+    }
+}
+
+/// `text/html` body.
+pub struct HtmlBody;
+
+impl HtmlBody {
+    pub const MIME_TYPE: &'static str = "text/html";
+
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new() -> SenderBody<String> {
+        SenderBody::new(BodyKind::Html)
+    }
+}
+
+/// A declared response of an endpoint.
+#[derive(Debug, Clone)]
+pub enum ResponseSpec {
+    /// A response with a validated body.
+    Body(BodyDescriptor),
+    /// A JSON:API error response (`true` shorthand).
+    Declared,
+    /// A JSON:API error response with a description.
+    Described(String),
+}
+
+impl<T> From<SenderBody<T>> for ResponseSpec {
+    fn from(value: SenderBody<T>) -> Self {
+        Self::Body(value.descriptor)
+    }
+}
+
+impl From<bool> for ResponseSpec {
+    fn from(_: bool) -> Self {
+        Self::Declared
+    }
+}
+
+impl From<&str> for ResponseSpec {
+    fn from(value: &str) -> Self {
+        Self::Described(value.to_string())
+    }
+}
+
+impl From<String> for ResponseSpec {
+    fn from(value: String) -> Self {
+        Self::Described(value)
+    }
+}
+
+/// Schemas of the parameters of an endpoint.
+#[derive(Debug, Clone, Default)]
+pub struct ParameterSchemas {
+    pub query: Option<TypeSchema>,
+    pub header: Option<TypeSchema>,
+    pub path: Option<TypeSchema>,
+    pub cookie: Option<TypeSchema>,
+}
+
+impl ParameterSchemas {
+    pub fn is_empty(&self) -> bool {
+        self.query.is_none() && self.header.is_none() && self.path.is_none() && self.cookie.is_none()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&'static str, &TypeSchema)> {
+        [
+            ("query", &self.query),
+            ("header", &self.header),
+            ("path", &self.path),
+            ("cookie", &self.cookie),
+        ]
+        .into_iter()
+        .filter_map(|(location, schema)| schema.as_ref().map(|s| (location, s)))
+    }
+}
+
+/// Type-erased metadata of an endpoint.
+#[derive(Debug, Clone, Default)]
+pub struct EndpointMeta {
     pub tags: Vec<spec::Tag>,
     pub summary: Option<String>,
     pub description: Option<String>,
     pub operation_id: String,
-    pub parameters: Parameters<Q, H, P, C>,
-    pub request_body: PhantomData<B>,
-    pub responses: Responses<R>,
+    /// Hides the endpoint from showing on the spec, but can still access.
+    pub hidden: Option<bool>,
     pub deprecated: Option<bool>,
-    pub security: Vec<security::Security>,
-    pub handler: EndpointHandler<Q, H, P, C, B, R>,
+    pub security: Vec<AppliedSecurity>,
+    pub parameters: ParameterSchemas,
+    pub request_body: Option<BodyDescriptor>,
+    pub responses: BTreeMap<u16, ResponseSpec>,
+    pub default_response: Option<BodyDescriptor>,
 }
 
-impl Default for Endpoint<(), (), (), (), (), ()> {
-    fn default() -> Self {
-        Self {
-            tags: Default::default(),
-            summary: Default::default(),
-            description: Default::default(),
-            operation_id: Default::default(),
-            parameters: Parameters::default(),
-            request_body: Default::default(),
-            responses: Default::default(),
-            deprecated: Default::default(),
-            security: Default::default(),
-            handler: noop_handler(),
+/// A validated incoming request passed to the endpoint handler.
+#[derive(Debug, Clone)]
+pub struct Request<Q = (), H = (), P = (), C = (), B = ()> {
+    pub queries: Q,
+    pub headers: H,
+    pub params: P,
+    pub cookies: C,
+    pub body: B,
+}
+
+/// The context of a request passed to the endpoint handler.
+#[derive(Debug)]
+pub struct Context {
+    /// The applied securities of the endpoint.
+    pub security: Vec<AppliedSecurity>,
+    /// Objects attached by the security handlers.
+    pub extensions: Extensions,
+    /// The raw request head.
+    pub request: http::request::Parts,
+}
+
+/// The payload of an [`HttpResponse`].
+pub enum ResponseBody<T> {
+    Empty,
+    Data(T),
+    /// A streamed body. It is neither validated nor serialized.
+    Stream(Body),
+}
+
+impl<T: fmt::Debug> fmt::Debug for ResponseBody<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("Empty"),
+            Self::Data(data) => f.debug_tuple("Data").field(data).finish(),
+            Self::Stream(_) => f.write_str("Stream(..)"),
         }
     }
 }
 
-fn noop_handler<Q, H, P, C, B>() -> EndpointHandler<Q, H, P, C, B, ()>
-where
-    Q: DataTransferObject,
-    H: DataTransferObject,
-    P: DataTransferObject,
-    C: DataTransferObject,
-    B: DataTransferObject,
-{
-    Arc::new(|_, _| Box::pin(async { HTTPResponse::<()>::default() }))
-}
-
-#[derive(Debug, Clone)]
-pub struct Request<Q, H, P, C, B>
-where
-    Q: DataTransferObject,
-    H: DataTransferObject,
-    P: DataTransferObject,
-    C: DataTransferObject,
-    B: DataTransferObject,
-{
-    pub queries: Option<Q>,
-    pub headers: Option<H>,
-    pub params: Option<P>,
-    pub cookies: Option<C>,
-    pub body: Option<B>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Parameters<Q, H, P, C>
-where
-    Q: DataTransferObject,
-    H: DataTransferObject,
-    P: DataTransferObject,
-    C: DataTransferObject,
-{
-    pub query: Q,
-    pub header: H,
-    pub path: P,
-    pub cookie: C,
-}
-
-impl Default for Parameters<(), (), (), ()> {
-    fn default() -> Self {
-        Self {
-            query: Default::default(),
-            header: Default::default(),
-            path: Default::default(),
-            cookie: Default::default(),
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct HTTPResponse<B: DataTransferObject> {
+/// The result of an endpoint handler.
+///
+/// When `status` is not set, `201 Created` is used for `post` endpoints and `200 OK` otherwise.
+#[derive(Debug)]
+pub struct HttpResponse<T> {
+    pub status: Option<StatusCode>,
     pub headers: HeaderMap,
-    pub status: StatusCode,
-    pub body: Option<B>,
+    pub body: ResponseBody<T>,
 }
 
-impl<B: DataTransferObject> HTTPResponse<B> {
-    fn send_status(status: StatusCode) -> Self {
+impl<T> HttpResponse<T> {
+    pub fn new(body: T) -> Self {
         Self {
-            status,
-            headers: Default::default(),
-            body: None,
+            status: None,
+            headers: HeaderMap::new(),
+            body: ResponseBody::Data(body),
         }
     }
 
-    fn without_body(status: StatusCode, headers: Option<HeaderMap>) -> Self {
+    pub fn with_status(status: StatusCode, body: T) -> Self {
+        Self::new(body).status(status)
+    }
+
+    pub fn without_body(status: StatusCode, headers: Option<HeaderMap>) -> Self {
         Self {
-            status,
+            status: Some(status),
             headers: headers.unwrap_or_default(),
-            body: None,
+            body: ResponseBody::Empty,
         }
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct SenderBody<B: DataTransferObject> {
-    pub description: Option<String>,
-    pub headers: HashMap<HeaderName, String>,
-    pub examples: HashMap<String, oas3::spec::Example>,
-    pub mime_type: Mime,
-    pub body: Option<B>,
-}
-
-impl<B: DataTransferObject> Default for SenderBody<B> {
-    fn default() -> Self {
+    pub fn stream(status: StatusCode, body: impl Into<Body>) -> Self {
         Self {
-            description: Default::default(),
-            headers: Default::default(),
-            examples: Default::default(),
-            mime_type: mime::APPLICATION_JSON,
-            body: None,
+            status: Some(status),
+            headers: HeaderMap::new(),
+            body: ResponseBody::Stream(body.into()),
+        }
+    }
+
+    pub fn status(mut self, status: StatusCode) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    pub fn header(mut self, name: HeaderName, value: HeaderValue) -> Self {
+        self.headers.insert(name, value);
+        self
+    }
+}
+
+impl<T> From<T> for HttpResponse<T> {
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+type SerializeFn = Box<dyn FnOnce(bool) -> Result<(Value, FileStore), String> + Send>;
+
+pub(crate) enum ErasedBody {
+    Empty,
+    Data(SerializeFn),
+    Stream(Body),
+}
+
+pub(crate) struct ErasedResponse {
+    pub status: Option<StatusCode>,
+    pub headers: HeaderMap,
+    pub body: ErasedBody,
+}
+
+impl<R: Serialize + Send + 'static> HttpResponse<R> {
+    fn erase(self) -> ErasedResponse {
+        let body = match self.body {
+            ResponseBody::Empty => ErasedBody::Empty,
+            ResponseBody::Stream(stream) => ErasedBody::Stream(stream),
+            ResponseBody::Data(data) => {
+                ErasedBody::Data(Box::new(move |with_files| {
+                    if with_files {
+                        let (value, files) = files::capture(|| serde_json::to_value(&data));
+                        value.map(|v| (v, files)).map_err(|e| e.to_string())
+                    } else {
+                        serde_json::to_value(&data)
+                            .map(|v| (v, FileStore::default()))
+                            .map_err(|e| e.to_string())
+                    }
+                }))
+            }
+        };
+
+        ErasedResponse {
+            status: self.status,
+            headers: self.headers,
+            body,
         }
     }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct Responses<B: DataTransferObject> {
-    pub ok_response: (StatusCode, SenderBody<B>),
-    pub other_responses: Vec<(StatusCode, SenderBody<()>)>,
-    pub default_response: Option<SenderBody<()>>,
+/// A part of an incoming request in its intermediate JSON representation.
+pub(crate) struct RawPart {
+    pub value: Value,
+    pub files: FileStore,
+    /// Whether string values may be coerced to the types of the schema.
+    pub coerce: bool,
 }
 
-// blank type
-impl DataTransferObject for () {}
+impl RawPart {
+    pub fn textual(value: Value) -> Self {
+        Self {
+            value,
+            files: FileStore::default(),
+            coerce: true,
+        }
+    }
+}
+
+pub(crate) struct RawInput {
+    pub body: RawPart,
+    pub queries: RawPart,
+    pub params: RawPart,
+    pub headers: RawPart,
+    pub cookies: RawPart,
+}
+
+pub(crate) enum HandlerError {
+    Validation(Vec<ValidationIssue>),
+    Api(ApiError),
+}
+
+type ErasedHandler = Arc<dyn Fn(RawInput, Context) -> BoxFuture<Result<ErasedResponse, HandlerError>> + Send + Sync>;
+
+/// A type-erased endpoint, created by [`Endpoint::handler`].
+#[derive(Clone)]
+pub struct LinzEndpoint {
+    pub(crate) meta: EndpointMeta,
+    pub(crate) handler: ErasedHandler,
+}
+
+impl LinzEndpoint {
+    pub fn meta(&self) -> &EndpointMeta {
+        &self.meta
+    }
+
+    pub fn meta_mut(&mut self) -> &mut EndpointMeta {
+        &mut self.meta
+    }
+
+    pub fn operation_id(&self) -> &str {
+        &self.meta.operation_id
+    }
+}
+
+impl fmt::Debug for LinzEndpoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinzEndpoint")
+            .field("meta", &self.meta)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A list of `method:path` keys (e.g. `get:/users/:id`) and their endpoints.
+pub type LinzEndpointGroup = Vec<(String, LinzEndpoint)>;
+
+/// A builder of an endpoint. The type parameters are the query (`Q`), header (`H`),
+/// path (`P`), cookie (`C`) and body (`B`) types of the validated [`Request`].
+pub struct Endpoint<Q = (), H = (), P = (), C = (), B = ()> {
+    meta: EndpointMeta,
+    _marker: TypeMarker<Q, H, P, C, B>,
+}
+
+type TypeMarker<Q, H, P, C, B> = PhantomData<fn() -> (Q, H, P, C, B)>;
+
+impl Endpoint {
+    pub fn new(operation_id: impl Into<String>) -> Self {
+        Self {
+            meta: EndpointMeta {
+                operation_id: operation_id.into(),
+                ..Default::default()
+            },
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<Q, H, P, C, B> Endpoint<Q, H, P, C, B> {
+    fn retype<Q2, H2, P2, C2, B2>(self) -> Endpoint<Q2, H2, P2, C2, B2> {
+        Endpoint {
+            meta: self.meta,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn tag(mut self, tag: spec::Tag) -> Self {
+        self.meta.tags.push(tag);
+        self
+    }
+
+    pub fn tags(mut self, tags: impl IntoIterator<Item = spec::Tag>) -> Self {
+        self.meta.tags.extend(tags);
+        self
+    }
+
+    pub fn summary(mut self, summary: impl Into<String>) -> Self {
+        self.meta.summary = Some(summary.into());
+        self
+    }
+
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.meta.description = Some(description.into());
+        self
+    }
+
+    /// Hides the endpoint from showing on the spec, but can still access.
+    pub fn hidden(mut self, hidden: bool) -> Self {
+        self.meta.hidden = Some(hidden);
+        self
+    }
+
+    pub fn deprecated(mut self, deprecated: bool) -> Self {
+        self.meta.deprecated = Some(deprecated);
+        self
+    }
+
+    pub fn security(mut self, security: AppliedSecurity) -> Self {
+        self.meta.security.push(security);
+        self
+    }
+
+    pub fn query<T: DataTransferObject>(mut self) -> Endpoint<T, H, P, C, B> {
+        self.meta.parameters.query = Some(TypeSchema::of::<T>());
+        self.retype()
+    }
+
+    pub fn header<T: DataTransferObject>(mut self) -> Endpoint<Q, T, P, C, B> {
+        self.meta.parameters.header = Some(TypeSchema::of::<T>());
+        self.retype()
+    }
+
+    pub fn path<T: DataTransferObject>(mut self) -> Endpoint<Q, H, T, C, B> {
+        self.meta.parameters.path = Some(TypeSchema::of::<T>());
+        self.retype()
+    }
+
+    pub fn cookie<T: DataTransferObject>(mut self) -> Endpoint<Q, H, P, T, B> {
+        self.meta.parameters.cookie = Some(TypeSchema::of::<T>());
+        self.retype()
+    }
+
+    pub fn request_body<T: DataTransferObject>(mut self, body: SenderBody<T>) -> Endpoint<Q, H, P, C, T> {
+        self.meta.request_body = Some(body.descriptor);
+        self.retype()
+    }
+
+    /// Declares a response. Accepts a [`SenderBody`], `true` or a description
+    /// (the latter two declare a JSON:API error response).
+    pub fn response(mut self, status: u16, spec: impl Into<ResponseSpec>) -> Self {
+        self.meta.responses.insert(status, spec.into());
+        self
+    }
+
+    /// Declares the response used when no response is declared for a status.
+    pub fn default_response<T>(mut self, body: SenderBody<T>) -> Self {
+        self.meta.default_response = Some(body.descriptor);
+        self
+    }
+}
+
+impl<Q, H, P, C, B> Endpoint<Q, H, P, C, B>
+where
+    Q: DataTransferObject,
+    H: DataTransferObject,
+    P: DataTransferObject,
+    C: DataTransferObject,
+    B: DataTransferObject,
+{
+    /// Sets the handler and finishes the endpoint.
+    pub fn handler<R, F, Fut>(self, handler: F) -> LinzEndpoint
+    where
+        R: Serialize + Send + 'static,
+        F: Fn(Request<Q, H, P, C, B>, Context) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<HttpResponse<R>, ApiError>> + Send + 'static,
+    {
+        let handler = Arc::new(handler);
+
+        let erased: ErasedHandler = Arc::new(move |input: RawInput, ctx: Context| {
+            let mut issues = Vec::new();
+
+            let body = decode_part::<B>("body", input.body, &mut issues);
+            let queries = decode_part::<Q>("queries", input.queries, &mut issues);
+            let params = decode_part::<P>("params", input.params, &mut issues);
+            let headers = decode_part::<H>("headers", input.headers, &mut issues);
+            let cookies = decode_part::<C>("cookies", input.cookies, &mut issues);
+
+            let request = match (queries, headers, params, cookies, body) {
+                (Some(queries), Some(headers), Some(params), Some(cookies), Some(body)) if issues.is_empty() => {
+                    Request {
+                        queries,
+                        headers,
+                        params,
+                        cookies,
+                        body,
+                    }
+                }
+                _ => return Box::pin(async move { Err(HandlerError::Validation(issues)) }),
+            };
+
+            let handler = handler.clone();
+            Box::pin(async move {
+                handler(request, ctx)
+                    .await
+                    .map(HttpResponse::erase)
+                    .map_err(HandlerError::Api)
+            })
+        });
+
+        LinzEndpoint {
+            meta: self.meta,
+            handler: erased,
+        }
+    }
+}
+
+fn decode_part<T: DataTransferObject>(
+    location: &'static str,
+    part: RawPart,
+    issues: &mut Vec<ValidationIssue>,
+) -> Option<T> {
+    // the part is not declared
+    if TypeId::of::<T>() == TypeId::of::<()>() {
+        return serde_json::from_value(Value::Null).ok();
+    }
+
+    let RawPart {
+        mut value,
+        files,
+        coerce,
+    } = part;
+    let compiled = schema::compiled::<T>();
+
+    if coerce {
+        schema::coerce(&mut value, &compiled.root);
+    }
+
+    let errors: Vec<ValidationFieldError> = compiled.validator.iter_errors(&value).map(Into::into).collect();
+    if !errors.is_empty() {
+        issues.push(ValidationIssue {
+            location,
+            result: serde_json::to_value(errors).unwrap_or_default(),
+        });
+        return None;
+    }
+
+    match files::with_inbox(&files, || serde_json::from_value::<T>(value)) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            issues.push(ValidationIssue {
+                location,
+                result: Value::String(err.to_string()),
+            });
+            None
+        }
+    }
+}

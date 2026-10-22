@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>{{title}}</title>
+  <meta charset="UTF-8" />
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+    }
+
+    #redoc-container {
+      height: 100vh;
+    }
+  </style>
+  <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+</head>
+
+<body>
+  <div id="redoc-container"></div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', function () {
+      Redoc.init(
+        "{{specUrl}}",
+        {
+          scrollYOffset: 50,
+          hideDownloadButton: false,
+          theme: {
+            colors: {
+              primary: { main: '#3498db' },
+            },
+          },
+        },
+        document.getElementById('redoc-container')
+      );
+    });
+  </script>
+</body>
+
+</html>
