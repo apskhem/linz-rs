@@ -563,7 +563,7 @@ fn error_response(status: StatusCode, errors: Vec<JsonApiErrorItem>, headers: He
 
 fn failure_response(failure: Failure, shared: &Shared) -> Response {
     match failure {
-        Failure::Api(err) => error_response(err.status, err.errors, err.headers),
+        Failure::Api(err) => error_response(err.status, err.errors, *err.headers),
         Failure::BodyParser(err) => {
             error_response(
                 err.status,

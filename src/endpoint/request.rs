@@ -52,7 +52,6 @@ pub struct Context<S = ()> {
 impl<S> Context<S> {
     /// Returns an object attached by a security handler, or a `500` error when it is missing,
     /// e.g. `let user = ctx.extension::<CurrentUser>()?;`.
-    #[allow(clippy::result_large_err)]
     pub fn extension<T: Send + Sync + 'static>(&self) -> Result<&T, ApiError> {
         self.extensions.get::<T>().ok_or_else(|| {
             ApiError::detail(

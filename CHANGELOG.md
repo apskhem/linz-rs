@@ -15,6 +15,9 @@ minor releases (0.x.0) may contain breaking changes.
 
 ### Changed
 
+- `ApiError::headers` is a `Box<HeaderMap>`, which keeps `Result<T, ApiError>` small enough for
+  Clippy's `result_large_err` lint (on by default since Rust 1.99) in handlers that return it.
+  Use `ApiError::with_headers` to set it.
 - The `core` module is renamed `endpoint`, so it no longer shadows Rust's built-in `core`
   crate. Items re-exported from the crate root (`use linz_rs::*;`) are unaffected; replace
   `linz_rs::core::` paths with `linz_rs::endpoint::`.

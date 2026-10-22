@@ -89,8 +89,8 @@ pub struct ApiError {
     pub status: StatusCode,
     /// The JSON:API error objects of the response.
     pub errors: Vec<JsonApiErrorItem>,
-    /// Extra headers of the response.
-    pub headers: HeaderMap,
+    /// Extra headers of the response. Boxed to keep `Result<T, ApiError>` small.
+    pub headers: Box<HeaderMap>,
 }
 
 impl ApiError {
@@ -104,7 +104,7 @@ impl ApiError {
         Self {
             status,
             errors,
-            headers: HeaderMap::new(),
+            headers: Box::default(),
         }
     }
 
@@ -115,7 +115,7 @@ impl ApiError {
 
     /// Sets extra headers of the response.
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
-        self.headers = headers;
+        self.headers = Box::new(headers);
         self
     }
 }
